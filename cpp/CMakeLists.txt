@@ -5,6 +5,8 @@ include( ExternalProject )
 project( parsoid CXX )
 # option( WITH_PHP "Build php bindings" ON )
 
+add_subdirectory( contrib/libhubbub )
+
 # Figure out the right CXX_FLAGS for c++11 support
 if(CMAKE_COMPILER_IS_GNUCXX)
     execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpversion
@@ -55,27 +57,6 @@ function( contrib_makeinstall proj subdir ) # & varargs...
 		${ARGN}
 	)
 endfunction()
-
-contrib_makeinstall( netsurf-buildsystem
-	contrib/netsurf/buildsystem
-)
-
-contrib_makeinstall( netsurf-libparserutils
-	contrib/netsurf/libparserutils
-	DEPENDS netsurf-buildsystem
-)
-
-contrib_makeinstall( netsurf-libhubbub
-	contrib/netsurf/libhubbub
-	DEPENDS netsurf-buildsystem netsurf-libparserutils
-)
-
-# TODO sorry, wind0ids.
-#contrib_make( netsurf-libjson
-#	contrib/netsurf/json-c/json-c
-#	CONFIGURE_COMMAND sh autogen.sh && ./configure --prefix=${CMAKE_BINARY_DIR}
-## XXX autogen is failing for some reason
-#)
 
 contrib_makeinstall( peg
 	contrib/peg-0.1.9

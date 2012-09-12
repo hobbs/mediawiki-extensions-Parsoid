@@ -1,18 +1,12 @@
-[submodule "cpp/contrib/netsurf/buildsystem"]
-	path = cpp/contrib/netsurf/buildsystem
-	url = git://git.netsurf-browser.org/buildsystem.git
-[submodule "cpp/contrib/netsurf/libhubbub"]
+[submodule "cpp/contrib/libhubbub"]
 	path = cpp/contrib/netsurf/libhubbub
-	url = git://git.netsurf-browser.org/libhubbub.git
-[submodule "cpp/contrib/netsurf/json-c"]
-	path = cpp/contrib/netsurf/json-c
-	url = git://git.netsurf-browser.org/json-c.git
-[submodule "cpp/contrib/netsurf/libparserutils"]
-	path = cpp/contrib/netsurf/libparserutils
-	url = git://git.netsurf-browser.org/libparserutils.git
+	url = git@github.com:adamwight/wmf-parsoid-libhubbub.git
 [submodule "cpp/contrib/folly"]
 	path = cpp/contrib/folly
 	url = git://github.com/facebook/folly.git
 [submodule "cpp/contrib/double-conversion"]
 	path = cpp/contrib/double-conversion
 	url = https://code.google.com/p/double-conversion/
+[submodule "cpp/contrib/libhubbub"]
+	path = cpp/contrib/libhubbub
+	url = git@github.com:adamwight/wmf-parsoid-libhubbub.git

@@ -34,6 +34,9 @@ function TemplateRequest ( env, title, oldid ) {
 		rvprop: 'content',
 		titles: title
 	};
+	if ( env.syncval ) {
+		apiargs.syncval = env.syncval;
+	}
 	if ( oldid ) {
 		apiargs.revids = oldid;
 		delete apiargs.titles;
@@ -107,16 +110,20 @@ TemplateRequest.prototype._handler = function (error, response, body) {
 		var redirMatch = src.match( /[\r\n\s]*#\s*redirect\s*\[\[([^\]]+)\]\]/i );
 		if ( redirMatch ) {
 			var title = redirMatch[1],
-				url = this.env.wgScript + '/api' +
+				apiargs = {
+					format: 'json',
+					action: 'query',
+					prop: 'revisions',
+					rvprop: 'content',
+					titles: title
+				};			
+        		if ( env.syncval ) {
+                		apiargs.syncval = env.syncval;
+        		}
+			var url = this.env.wgScript + '/api' +
 				this.env.wgScriptExtension +
 				'?' +
-				qs.stringify( {
-					format: 'json',
-				action: 'query',
-				prop: 'revisions',
-				rvprop: 'content',
-				titles: title
-				} );
+				qs.stringify( apiargs );
 			//'?format=json&action=query&prop=revisions&rvprop=content&titles=' + title;
 			this.requestOptions.url = url;
 			request( this.requestOptions, this._handler.bind(this) );

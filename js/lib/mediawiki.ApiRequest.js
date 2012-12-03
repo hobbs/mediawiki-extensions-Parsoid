@@ -1,5 +1,23 @@
 "use strict";
 
+function GUID ()
+{
+    var S4 = function ()
+    {
+        return Math.floor(
+                Math.random() * 0x10000 /* 65536 */
+            ).toString(16);
+    };
+
+    return (
+            S4() + S4() + "-" +
+            S4() + "-" +
+            S4() + "-" +
+            S4() + "-" +
+            S4() + S4() + S4()
+        );
+}
+
 var request = require('request'),
 	$ = require( 'jquery' ),
 	qs = require('querystring'),
@@ -37,6 +55,7 @@ function TemplateRequest ( env, title, oldid ) {
 	if ( env.syncval ) {
 		apiargs.syncval = env.syncval;
 	}
+	apiargs.cb = GUID();
 	if ( oldid ) {
 		apiargs.revids = oldid;
 		delete apiargs.titles;
@@ -120,6 +139,7 @@ TemplateRequest.prototype._handler = function (error, response, body) {
         		if ( env.syncval ) {
                 		apiargs.syncval = env.syncval;
         		}
+			apiargs.cb = GUID();
 			var url = this.env.wgScript + '/api' +
 				this.env.wgScriptExtension +
 				'?' +

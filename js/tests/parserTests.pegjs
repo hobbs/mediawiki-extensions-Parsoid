@@ -100,7 +100,7 @@ end_test =
 test =
     start_test
     title:text
-    sections:section*
+    sections:(section / option_section)*
     end_test
 {
     var test = {
@@ -115,13 +115,86 @@ test =
 }
 
 section =
-    "!!" ws? (!"end") name:(c:[a-zA-Z0-9]+ { return c.join(''); }) rest_of_line
+    "!!" ws? (!"end") (!"options") name:(c:[a-zA-Z0-9]+ { return c.join(''); }) rest_of_line
     text:text
 {
     return {
         name: name,
         text: text
     };
+}
+
+option_section =
+    "!!" ws? "options" ws? eol
+    opts:option_list?
+{
+    var o = {};
+    if (opts && opts.length) {
+        for (var i = 0; i < opts.length; i++) {
+            o[opts[i].k] = opts[i].v || '';
+        }
+    }
+    return {
+        name: "options",
+        text: o
+    };
+}
+
+option_list = o:an_option [ \t\n]+ rest:option_list?
+{
+    var result = [ o ];
+    if (rest && rest.length) {
+        result.push.apply(result, rest);
+    }
+    return result;
+}
+
+// from PHP parser in tests/parser/parserTest.inc:parseOptions()
+//   foo
+//   foo=bar
+//   foo="bar baz"
+//   foo=[[bar baz]]
+//   foo=bar,"baz quux",[[bat]]
+an_option = k:option_name v:option_value?
+{
+    return {k:k.toLowerCase(), v:(v||'')};
+}
+
+option_name = c:[^ \t\n=!]+
+{
+    return c.join('');
+}
+
+option_value = ws? "=" ws? ovl:option_value_list
+{
+    return (ovl.length===1) ? ovl[0] : ovl;
+}
+
+option_value_list = v:an_option_value
+                    rest:( ws? "," ws? ovl:option_value_list {return ovl; })?
+{
+    var result = [ v ];
+    if (rest && rest.length) {
+        result.push.apply(result, rest);
+    }
+    return result;
+}
+
+an_option_value = link_target_value / quoted_value / plain_value
+
+link_target_value = v:("[[" (c:[^\]]* { return c.join(''); }) "]]")
+{
+    return v.join('');
+}
+
+quoted_value = [\"] v:[^\"]* [\"]
+{
+    return v.join('');
+}
+
+plain_value = v:[^ \t\n\"\'\[\]=,!]+
+{
+    return v.join('');
 }
 
 /* the : is for a stray one, not sure it should be there */

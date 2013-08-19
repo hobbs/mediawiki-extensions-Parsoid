@@ -28,14 +28,13 @@
  + --------------+-----------------+---------------+--------------------------+
  | SOL           | --- nl      --> | SOL           | purge                    |
  | SOL           | --- eof     --> | SOL           | purge                    |
- | SOL           | --- ws      --> | PRE           | save whitespace token(##)|
+ | SOL           | --- ws      --> | PRE|SOL       | save ws token|purge(#,##)|
  | SOL           | --- sol-tr  --> | SOL           | TOKS << tok              |
  | SOL           | --- other   --> | IGNORE        | purge                    |
  + --------------+-----------------+---------------+--------------------------+
- | PRE           | --- nl      --> | SOL           | purge   if |TOKS| == 0   |
- |               |                 |               | gen-pre if |TOKS| > 0 (#)|
- | PRE           |  html-blk tag   | IGNORE        | purge   if |TOKS| == 0   |
- |               |  wt-table tag   |               | gen-pre if |TOKS| > 0 (#)|
+ | PRE           | --- nl      --> | SOL           | purge                    |
+ | PRE           |  html-blk tag   | IGNORE        | purge                    |
+ |               |  wt-table tag   |               |                          |
  | PRE           | --- eof     --> | SOL           | purge                    |
  | PRE           | --- sol-tr  --> | PRE           | SOL-TR-TOKS << tok       |
  | PRE           | --- other   --> | PRE_COLLECT   | TOKS = SOL-TR-TOKS + tok |
@@ -47,7 +46,8 @@
  + --------------+-----------------+---------------+--------------------------+
  | MULTILINE_PRE | --- nl      --> | SOL           | gen-pre                  |
  | MULTILINE_PRE | --- eof     --> | SOL           | gen-pre                  |
- | MULTILINE_PRE | --- ws      --> | PRE           | pop saved nl token (##)  |
+ | MULTILINE_PRE | --- ws      --> | PRE_COLLECT   | pop saved nl token (##)  |
+ |               |                 |               | TOKS = SOL-TR-TOKS + tok |
  | MULTILINE_PRE | --- sol-tr  --> | MULTILINE_PRE | SOL-TR-TOKS << tok       |
  | MULTILINE_PRE | --- any     --> | IGNORE        | gen-pre                  |
  + --------------+-----------------+---------------+--------------------------+
@@ -55,12 +55,9 @@
  | IGNORE        | --- eof     --> | SOL           | purge                    |
  + --------------+-----------------+---------------+--------------------------+
 
- # In PRE-state, |TOKS| > 0 only if we got here from MULTILINE_PRE.  In addition,
-   we are guaranteed that they will not all be whitespace/sol-transparent tokens
-   since the transition path would have been:
-      SOL -> PRE -> PRE_COLLECT -> MULTILINE_PRE -> PRE
-   and the transition from PRE -> PRE_COLLECT adds a non-ws/non-sol-tr token
-   to TOKS.
+ # We're being careful to avoid a situation where we generate a pre when we're
+   already inside a pre. If we've seen an open pre tag (marked as inPre), stay
+   in SOL and purge. Otherwise, save the whitespace token and transition to PRE.
 
  ## In these states, check if the whitespace token is a single space or has
    additional chars (white-space or non-whitespace) -- if yes, slice it off
@@ -68,26 +65,43 @@
 
  * --------------------------------------------------------------------------*/
 
-var Util = require('./mediawiki.Util.js').Util;
+var Util = require('./mediawiki.Util.js').Util,
+    defines = require('./mediawiki.parser.defines.js');
+// define some constructor shortcuts
+var CommentTk = defines.CommentTk,
+    EOFTk = defines.EOFTk,
+    TagTk = defines.TagTk,
+    SelfclosingTagTk = defines.SelfclosingTagTk,
+    EndTagTk = defines.EndTagTk;
+
+var init; // forward declaration.
+
+function isPre( token, tag ) {
+	return token.constructor === tag && token.isHTMLTag() && token.name.toUpperCase() === "PRE";
+}
 
 // Constructor
 function PreHandler( manager, options ) {
 	this.manager = manager;
-	this.manager.addTransform(this.onNewline.bind(this),
-		"PreHandler:onNewline", this.nlRank, 'newline');
-	this.manager.addTransform(this.onEnd.bind(this),
-		"PreHandler:onEnd", this.endRank, 'end');
 	var env = manager.env;
-	this.debug = env.debug || (env.traceFlags && (env.traceFlags.indexOf("pre_debug") !== -1));
-	this.trace = this.debug || (env.traceFlags && (env.traceFlags.indexOf("pre") !== -1));
-	init(this, true);
+	this.debug = env.conf.parsoid.debug || (env.conf.parsoid.traceFlags && (env.conf.parsoid.traceFlags.indexOf("pre_debug") !== -1));
+	this.trace = this.debug || (env.conf.parsoid.traceFlags && (env.conf.parsoid.traceFlags.indexOf("pre") !== -1));
+
+	// <pre> seems to be disabled in <ref> tags
+	if (options.extTag !== "ref") {
+		this.manager.addTransform(this.onNewline.bind(this),
+			"PreHandler:onNewline", this.nlRank, 'newline');
+		this.manager.addTransform(this.onEnd.bind(this),
+			"PreHandler:onEnd", this.endRank, 'end');
+		init(this, true);
+	}
 }
 
 // Handler ranks
-PreHandler.prototype.nlRank   = 2.02;
-PreHandler.prototype.anyRank  = 2.03;
-PreHandler.prototype.endRank  = 2.04;
-PreHandler.prototype.skipRank = 2.05; // should be higher than all other ranks above
+PreHandler.prototype.nlRank   = 2.051;
+PreHandler.prototype.anyRank  = 2.052;
+PreHandler.prototype.endRank  = 2.053;
+PreHandler.prototype.skipRank = 2.054; // should be higher than all other ranks above
 
 // FSM states
 PreHandler.STATE_SOL = 1;
@@ -96,9 +110,22 @@ PreHandler.STATE_PRE_COLLECT = 3;
 PreHandler.STATE_MULTILINE_PRE = 4;
 PreHandler.STATE_IGNORE = 5;
 
-function init(handler, addAnyHandler) {
+// debug string output of FSM states
+PreHandler.STATE_STR = {
+	1: 'sol        ',
+	2: 'pre        ',
+	3: 'pre_collect',
+	4: 'multiline  ',
+	5: 'ignore     '
+};
+
+init = function(handler, addAnyHandler) {
 	handler.state  = PreHandler.STATE_SOL;
-	handler.lastNLTk = null;
+	handler.lastNlTk = null;
+	// Initialize to zero to deal with indent-pre
+	// on the very first line where there is no
+	// preceding newline to initialize this.
+	handler.preTSR = 0;
 	handler.tokens = [];
 	handler.preWSToken = null;
 	handler.multiLinePreWSToken = null;
@@ -107,7 +134,7 @@ function init(handler, addAnyHandler) {
 		handler.manager.addTransform(handler.onAny.bind(handler),
 			"PreHandler:onAny", handler.anyRank, 'any');
 	}
-}
+};
 
 PreHandler.prototype.moveToIgnoreState = function() {
 	this.state = PreHandler.STATE_IGNORE;
@@ -146,17 +173,21 @@ PreHandler.prototype.processPre = function(token) {
 
 	// pre only if we have tokens to enclose
 	if (this.tokens.length > 0) {
-		ret = [ new TagTk('pre') ].concat(ret).concat(this.tokens);
+		var da = null;
+		if (this.preTSR !== -1) {
+			da = { tsr: [this.preTSR, this.preTSR+1] };
+		}
+		ret = [ new TagTk('pre', [], da) ].concat(ret).concat(this.tokens);
 		ret.push(new EndTagTk('pre'));
 	}
-
-	this.popLastNL(ret);
 
 	// emit multiline-pre WS token
 	if (this.multiLinePreWSToken) {
 		ret.push(this.multiLinePreWSToken);
 		this.multiLinePreWSToken = null;
 	}
+
+	this.popLastNL(ret);
 
 	// sol-transparent toks
 	ret = ret.concat(this.solTransparentTokens);
@@ -173,25 +204,31 @@ PreHandler.prototype.processPre = function(token) {
 };
 
 PreHandler.prototype.onNewline = function (token, manager, cb) {
-	if (this.trace) {
-		if (this.debug) console.warn("----------");
-		console.warn("T:pre:nl : " + this.state);
+	function initPreTSR(nltk) {
+		var da = nltk.dataAttribs;
+		// tsr[1] can never be zero, so safe to use da.tsr[1] to check for null/undefined
+		return (da && da.tsr && da.tsr[1]) ? da.tsr[1] : -1;
 	}
+
+	if (this.trace) {
+		if (this.debug) { console.warn("----------"); }
+		console.warn("T:pre:nl : " + PreHandler.STATE_STR[this.state] + " : " + JSON.stringify(token));
+	}
+
+	// Whenever we move into SOL-state, init preTSR to
+	// the newline's tsr[1].  This will later be  used
+	// to assign 'tsr' values to the <pre> token.
 
 	var ret = null;
 	switch (this.state) {
 		case PreHandler.STATE_SOL:
 			ret = this.getResultAndReset(token);
+			this.preTSR = initPreTSR(token);
 			break;
 
 		case PreHandler.STATE_PRE:
-			if (this.tokens.length > 0) {
-				// we got here from a multiline-pre
-				ret = this.processPre(token);
-			} else {
-				// we will never get here from a multiline-pre
-				ret = this.getResultAndReset(token);
-			}
+			ret = this.getResultAndReset(token);
+			this.preTSR = initPreTSR(token);
 			this.state = PreHandler.STATE_SOL;
 			break;
 
@@ -202,6 +239,7 @@ PreHandler.prototype.onNewline = function (token, manager, cb) {
 
 		case PreHandler.STATE_MULTILINE_PRE:
 			ret = this.processPre(token);
+			this.preTSR = initPreTSR(token);
 			this.state = PreHandler.STATE_SOL;
 			break;
 
@@ -209,6 +247,7 @@ PreHandler.prototype.onNewline = function (token, manager, cb) {
 			ret = [token];
 			ret.rank = this.skipRank; // prevent this from being processed again
 			init(this, true); // Reset!
+			this.preTSR = initPreTSR(token);
 			break;
 	}
 
@@ -221,6 +260,8 @@ PreHandler.prototype.onNewline = function (token, manager, cb) {
 };
 
 PreHandler.prototype.onEnd = function (token, manager, cb) {
+	this.inPre = false;
+
 	if (this.state !== PreHandler.STATE_IGNORE) {
 		console.error("!ERROR! Not IGNORE! Cannot get here: " + this.state + "; " + JSON.stringify(token));
 		init(this, false);
@@ -231,16 +272,32 @@ PreHandler.prototype.onEnd = function (token, manager, cb) {
 	return {tokens: [token]};
 };
 
-function isTableTag(token) {
+function getUpdatedPreTSR(tsr, token) {
 	var tc = token.constructor;
-	return (tc === TagTk || tc === EndTagTk) &&
-		['table','tr','td','th','tbody'].indexOf(token.name) !== -1;
+	if (tc === CommentTk) {
+		tsr = token.dataAttribs.tsr ? token.dataAttribs.tsr[1] : (tsr === -1 ? -1 : token.value.length + 7 + tsr);
+	} else if (tc === SelfclosingTagTk) {
+		// meta-tag (cannot compute)
+		tsr = -1;
+	} else if (tsr !== -1) {
+		// string
+		tsr = tsr + token.length;
+	}
+
+	return tsr;
 }
 
 PreHandler.prototype.onAny = function ( token, manager, cb ) {
+
+	if ( isPre( token, TagTk ) ) {
+		this.inPre = true;
+	} else if ( isPre( token, EndTagTk ) ) {
+		this.inPre = false;
+	}
+
 	if (this.trace) {
-		if (this.debug) console.warn("----------");
-		console.warn("T:pre:any: " + this.state + " : " + JSON.stringify(token));
+		if (this.debug) { console.warn("----------"); }
+		console.warn("T:pre:any: " + PreHandler.STATE_STR[this.state] + " : " + JSON.stringify(token));
 	}
 
 	if (this.state === PreHandler.STATE_IGNORE) {
@@ -264,11 +321,12 @@ PreHandler.prototype.onAny = function ( token, manager, cb ) {
 		}
 
 		// reset for next use of this pipeline!
+		this.inPre = false;
 		init(this, false);
 	} else {
 		switch (this.state) {
 			case PreHandler.STATE_SOL:
-				if ((tc === String) && token.match(/^\s/)) {
+				if ((tc === String) && token.match(/^\s/) && !this.inPre) {
 					ret = this.tokens;
 					this.tokens = [];
 					this.preWSToken = token[0];
@@ -278,7 +336,10 @@ PreHandler.prototype.onAny = function ( token, manager, cb ) {
 						// as a new token
 						this.onAny(token.slice(1), manager, cb);
 					}
-				} else if (Util.isSolTransparent(token)) { // continue watching
+				} else if (Util.isSolTransparent(token)) {
+					// continue watching ...
+					// update pre-tsr since we haven't transitioned to PRE yet
+					this.preTSR = getUpdatedPreTSR(this.preTSR, token);
 					this.tokens.push(token);
 				} else {
 					ret = this.getResultAndReset(token);
@@ -289,16 +350,10 @@ PreHandler.prototype.onAny = function ( token, manager, cb ) {
 			case PreHandler.STATE_PRE:
 				if (Util.isSolTransparent(token)) { // continue watching
 					this.solTransparentTokens.push(token);
-				} else if (isTableTag(token) ||
+				} else if (Util.isTableTag(token) ||
 					(token.isHTMLTag() && Util.isBlockTag(token.name)))
 				{
-					if (this.tokens.length > 0) {
-						// we got here from a multiline-pre
-						ret = this.processPre(token);
-					} else {
-						// we can never get here from a multiline-pre
-						ret = this.getResultAndReset(token);
-					}
+					ret = this.getResultAndReset(token);
 					this.moveToIgnoreState();
 				} else {
 					this.tokens = this.tokens.concat(this.solTransparentTokens);
@@ -316,6 +371,9 @@ PreHandler.prototype.onAny = function ( token, manager, cb ) {
 					ret = this.processPre(token);
 					this.moveToIgnoreState();
 				} else {
+					// discard pre/multiline-pre ws tokens that got us here
+					this.preWSToken = null;
+					this.multiLinePreWSToken = null;
 					// nothing to do .. keep collecting!
 					this.tokens.push(token);
 				}
@@ -324,13 +382,16 @@ PreHandler.prototype.onAny = function ( token, manager, cb ) {
 			case PreHandler.STATE_MULTILINE_PRE:
 				if ((tc === String) && token.match(/^\s/)) {
 					this.popLastNL(this.tokens);
-					this.state = PreHandler.STATE_PRE;
+					this.state = PreHandler.STATE_PRE_COLLECT;
+
+					// Pop buffered sol-transparent tokens
+					this.tokens = this.tokens.concat(this.solTransparentTokens);
+					this.solTransparentTokens = [];
 
 					// check if token is single-space or more
 					this.multiLinePreWSToken = token[0];
 					if (!token.match(/^\s$/)) {
-						// Treat everything after the first space
-						// as a new token
+						// Treat everything after the first space as a new token
 						this.onAny(token.slice(1), manager, cb);
 					}
 				} else if (Util.isSolTransparent(token)) { // continue watching

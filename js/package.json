@@ -3,15 +3,15 @@
 	"description": "Mediawiki parser for the VisualEditor.",
 	"version": "0.0.1",
 	"dependencies": {
+		"alea": "~0.0.9",
+		"entities": "~0.2.2",
 		"events": "0.x.x",
-		"jquery": "1.x.x",
 		"request": "2.x.x",
 		"querystring": "0.x.x",
 		"path": "0.x.x",
-		"jshashes": "0.x.x",
 		"optimist": "0.x.x",
 		"assert": "0.x.x",
-		"jsdom": "0.x.x",
+		"domino": "~1.0.12",
 		"pegjs": "0.7.x",
 		"lru-cache": "1.x.x",
 		"async": "0.x.x",
@@ -19,11 +19,11 @@
 	},
 	"devDependencies": {
 		"colors": "0.x.x",
-		"diff": "1.x.x",
-		"html5": "0.x.x"
+		"diff": "1.x.x"
 	},
 	"main": "mediawiki.parser.js",
 	"scripts": {
+		"start": "node api/server.js",
 		"pretest": "node tests/fetch-parserTests.txt.js",
 		"test": "node tests/parserTests.js"
 	}

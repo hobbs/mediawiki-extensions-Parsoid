@@ -1,25 +1,28 @@
-"use strict";
-/**
+/*
  * Some parser functions, and quite a bunch of stubs of parser functions.
+ *
+ * IMPORTANT NOTE: These parser functions are only used by the Parsoid-native
+ * template expansion pipeline, which is *not* the default or used in
+ * production. Normally we use API calls into a MediaWiki installation to
+ * implement parser functions and other preprocessor functionality. The only
+ * use of this code is currently in parserTests, but those tests should
+ * probably be marked as PHP-only and any mixed testing moved into separate
+ * tests. This means that there is not much point in spending time on
+ * implementing more parser functions here.
+ *
  * There are still quite a few missing, see
  * http://www.mediawiki.org/wiki/Help:Magic_words and
  * http://www.mediawiki.org/wiki/Help:Extension:ParserFunctions.
  * Instantiated and called by the TemplateHandler extension. Any pf_<prefix>
  * matching a lower-cased template name prefix up to the first colon will
  * override that template.
- *
- * TODO: Implement these more thoroughly, and test against
- * extensions/ParserFunction/
- *     convertTests.txt
- *     exprTests.txt
- *     funcsParserTests.txt
- *     stringFunctionTests.txt
- *
- * @author Gabriel Wicke <gwicke@wikimedia.org>
  */
+
+"use strict";
 
 var async = require('async');
 var Util = require('./mediawiki.Util.js').Util;
+var defines = require('./mediawiki.parser.defines.js');
 
 function ParserFunctions ( manager ) {
 	this.manager = manager;
@@ -28,10 +31,12 @@ function ParserFunctions ( manager ) {
 
 // Temporary helper.
 ParserFunctions.prototype._rejoinKV = function ( trim, k, v ) {
-	if ( k.length ) {
+	if ( k.constructor === String && k.length > 0 ) {
+		return [k].concat( ['='], v );
+	} else if (k.constructor === Array && k.length > 0) {
 		return k.concat( ['='], v );
 	} else {
-		return trim ? Util.tokenTrim(v) : v;
+		return trim ? (v.constructor === String ? v.trim() : Util.tokenTrim(v)) : v;
 	}
 };
 
@@ -47,12 +52,12 @@ ParserFunctions.prototype.expandKV = function ( kv, cb, defaultValue, type, trim
 	if ( kv === undefined ) {
 		cb( { tokens: [ defaultValue || '' ] } );
 	} else if ( kv.constructor === String ) {
-		return cb( kv );
+		return cb( { tokens: [kv] } );
 	} else if ( kv.k.constructor === String && kv.v.constructor === String ) {
 		if ( kv.k ) {
 			cb( { tokens: [kv.k + '=' + kv.v] } );
 		} else {
-			cb( { tokens: trim ? Util.tokenTrim([kv.v]) : [kv.v] } );
+			cb( { tokens: [trim ? kv.v.trim() : kv.v] } );
 		}
 	} else {
 		var self = this,
@@ -86,18 +91,26 @@ ParserFunctions.prototype._switchLookupFallback = function ( frame, kvs, key, di
 	this.manager.env.tp('swl');
 	this.manager.env.dp('_switchLookupFallback', kvs.length, key, v );
 	var _cbTrim = function( res ) {
-		if (res.switchToAsync) {
-			cb(res);
+		if ( res.constructor === String ) {
+			cb( { tokens: [ res.trim() ], async: res.async } );
+		} else if ( res.constructor === Array ) {
+			cb( { tokens: Util.tokenTrim(res), async: res.async } );
 		} else {
-			cb( { tokens: Util.tokenTrim(res) } );
+			cb( res );
 		}
 	};
 	var _cbNoTrim = function( res ) {
-		if (res.switchToAsync) {
-			cb(res);
+		if ( res.constructor === String ) {
+			cb( { tokens: [ res ], async: res.async } );
+		} else if ( res.constructor === Array ) {
+			cb( { tokens: res, async: res.async } );
+		} else if ( res.async ) {
+			cb( res );
 		} else {
-			cb( { tokens: res } );
+			console.log( res );
+			console.trace();
 		}
+
 	};
 
 	// 'v' need not be a string in cases where it is the last fall-through case
@@ -172,12 +185,13 @@ ParserFunctions.prototype._switchLookupFallback = function ( frame, kvs, key, di
 					// SSS FIXME: JSHint is warning us not to create
 					// funtions in a loop -- worth creating a static fn.
 					// and using it, but have to bind lots of args -- lazy today.
-					cb: function( val ) {
+					/* jshint loopfunc: true */
+					cb: function( i, val ) {
 						process.nextTick(
 							self._switchLookupFallback.bind( self, frame,
 								kvs.slice(i+1), key, dict, cb, val )
 						);
-					},
+					}.bind( self, i ),
 					asyncCB: cb
 				});
 				return;
@@ -207,7 +221,7 @@ ParserFunctions.prototype._switchLookupFallback = function ( frame, kvs, key, di
 			cb ( {} );
 		}
 	} else if ( v ) {
-		cb( { tokens: v } );
+		cb( { tokens: v.constructor === Array ? v : [v] } );
 	} else {
 		// nothing found at all.
 		cb( {} );
@@ -226,7 +240,9 @@ ParserFunctions.prototype['pf_#switch'] = function ( token, frame, cb, args ) {
 		this.env.dp( 'switch found: ', target, dict, ' res=', dict[target] );
 		dict[target].get({
 			type: 'tokens/x-mediawiki/expanded',
-			cb: function( res ) { cb ( { tokens: Util.tokenTrim(res) } ); },
+			cb: function( res ) {
+				cb ( { tokens: res.constructor === String ? [res.trim()] : Util.tokenTrim(res) } );
+			},
 			asyncCB: cb
 		});
 	} else {
@@ -259,6 +275,7 @@ ParserFunctions.prototype['pf_#expr'] = function ( token, frame, cb, args ) {
 	if ( target ) {
 		try {
 			// FIXME: make this safe and implement MW expressions!
+			/* jshint evil:true */ // yes, this is evil.  we'll fix it someday
 			var f = new Function ( 'return (' + target + ')' );
 			res = f();
 		} catch ( e ) {
@@ -283,6 +300,7 @@ ParserFunctions.prototype['pf_#ifexpr'] = function ( token, frame, cb, args ) {
 	if ( target ) {
 		try {
 			// FIXME: make this safe, and fully implement MW expressions!
+			/* jshint evil:true */ // yes, this is evil.  we'll fix it someday
 			var f = new Function ( 'return (' + target + ')' );
 			res = f();
 		} catch ( e ) {
@@ -402,63 +420,57 @@ ParserFunctions.prototype.pf_padright = function ( token, frame, cb, params ) {
 };
 
 ParserFunctions.prototype['pf_#tag'] = function ( token, frame, cb, args ) {
-	// TODO: handle things like {{#tag:nowiki|{{{input1|[[shouldnotbelink]]}}}}}
-	// https://www.mediawiki.org/wiki/Future/Parser_development#Token_stream_transforms
+	// Check http://www.mediawiki.org/wiki/Extension:TagParser for more info
+	// about the #tag parser function.
 	var target = args[0].k;
-	if ( args[1] ) {
-		args[1].v.get({
-			type: 'tokens/x-mediawiki/expanded',
-			cb: this.tag_worker.bind( this, target, cb ),
-			asyncCB: cb
-		});
+	if (!target || target === '') {
+		cb({});
 	} else {
-		this.tag_worker( target, cb, [''] );
+		// remove tag-name
+		args.shift();
+		Util.expandParserValueValues(args, this.tag_worker.bind(this, target, cb));
 	}
 };
 
-ParserFunctions.prototype.tag_worker = function( target, cb, content ) {
-	cb({
-		tokens: [ new TagTk( target ) ]
-			.concat( content,
-				[ new EndTagTk( target ) ] )
-	});
+ParserFunctions.prototype.tag_worker = function( target, cb, kvs ) {
+	var contentToks = [];
+	var tagAttribs = [];
+	for (var i = 0, n = kvs.length; i < n; i++) {
+		if (kvs[i].k === '') {
+			contentToks = contentToks.concat(kvs[i].v);
+		} else {
+			tagAttribs.push(kvs[i]);
+		}
+	}
+
+	var ret = [new defines.TagTk(target, tagAttribs)];
+	ret = ret.concat(contentToks);
+	ret.push(new defines.EndTagTk(target));
+	cb({ tokens: ret });
 };
 
 
 // TODO: These are just quick wrappers for now, optimize!
-ParserFunctions.prototype.pf_currentyear = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'Y', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentmonth = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'm', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentmonthname = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'F', [], {} ) );
-};
+[['year','Y'], ['month','m'], ['monthname','F'], ['monthabbrev','M'],
+ ['week', 'W'], ['day','j'], ['day2','d'], ['dow', 'w'], ['dayname','l'],
+ ['time','H:i'], ['hour','H'], ['week','W'],
+ ['timestamp', 'YmdHis']].forEach(function(a) {
+	 var name = a[0], format = a[1];
+	 ParserFunctions.prototype['pf_current'+name] =
+		 function ( token, frame, cb, args ) {
+			 cb( this._pf_time_tokens( format, [], {} ) );
+		 };
+	 ParserFunctions.prototype['pf_local'+name] =
+		 function ( token, frame, cb, args ) {
+			 cb( this._pf_timel_tokens( format, [], {} ) );
+		 };
+ });
 // XXX Actually use genitive form!
 ParserFunctions.prototype.pf_currentmonthnamegen = function ( token, frame, cb, args ) {
 	cb( this._pf_time_tokens( 'F', [], {} ) );
 };
-ParserFunctions.prototype.pf_currentmonthabbrev = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'M', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentweek = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'W', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentdow = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'w', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentday = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'j', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentday2 = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'd', [], {} ) );
-};
-ParserFunctions.prototype.pf_currentdayname = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'l', [], {} ) );
-};
-ParserFunctions.prototype.pf_currenttime = function ( token, frame, cb, args ) {
-	cb( this._pf_time_tokens( 'H:i', [], {} ) );
+ParserFunctions.prototype.pf_localmonthnamegen = function ( token, frame, cb, args ) {
+	cb( this._pf_timel_tokens( 'F', [], {} ) );
 };
 
 // A first approximation of time stuff.
@@ -475,8 +487,17 @@ ParserFunctions.prototype['pf_#time'] = function ( token, frame, cb, args ) {
 ParserFunctions.prototype._pf_time_tokens = function ( target, args ) {
 	return { tokens: this._pf_time( target, args ) };
 };
+ParserFunctions.prototype['pf_#timel'] = function ( token, frame, cb, args ) {
+	cb ( { tokens: this._pf_time( args[0].k, args.slice(1), 'local' ) } );
+};
 
-ParserFunctions.prototype._pf_time = function ( target, args ) {
+ParserFunctions.prototype._pf_timel_tokens = function ( target, args ) {
+	return { tokens: this._pf_time( target, args, 'local' ) };
+};
+
+var ParsoidDate; // forward declaration
+
+ParserFunctions.prototype._pf_time = function ( target, args, isLocal ) {
 	var res,
 		tpl = target.trim();
 	//try {
@@ -485,20 +506,48 @@ ParserFunctions.prototype._pf_time = function ( target, args ) {
 	//} catch ( e ) {
 	//	this.env.dp( 'ERROR: #time ' + e );
 
-		try {
-			res = [ new Date().format ( tpl ) ];
-		} catch ( e2 ) {
-			this.env.dp( 'ERROR: #time ' + e2 );
-			res = [ new Date().toString() ];
-		}
-		return res;
+	var date = new ParsoidDate(this.env, isLocal);
+	try {
+		res = [ date.format ( tpl ) ];
+	} catch ( e2 ) {
+		this.env.dp( 'ERROR: #time ' + e2 );
+		res = [ date.toString() ];
+	}
+	return res;
 };
 
 // Simulates PHP's date function
-// FIXME: don't patch Date.prototype!
-Date.prototype.format = function(format) {
+// NOTE that Javascript doesn't have a proper user-specified-timezone API.
+// PHP format specifiers which return the name of the timezone (for example,
+// 'e' and 'T') can't be implemented in JavaScript w/o the use of an external
+// timezone database, like for instance https://github.com/mde/timezone-js
+// CURRENTLY NO SUPPORT FOR NON-GREGORIAN CALENDARS
+ParsoidDate = function(env, isLocal, forcetime) {
+	var date = new Date();
+	var offset = date.getTimezoneOffset();
+	// XXX: parse forcetime and change date
+	// when testing, look aside to other date?
+	if (typeof(env.conf.wiki.fakeTimestamp)==='number') {
+		// php time stamps are in seconds; js timestamps are in milliseconds
+		date.setTime(env.conf.wiki.fakeTimestamp * 1000);
+	}
+	if (typeof(env.conf.wiki.timezoneOffset)==='number') {
+		// this is the wiki's $wgLocaltimezone (if set)
+		offset = env.conf.wiki.timezoneOffset;
+	}
+	if (!isLocal) {
+		offset = 0; // UTC
+	}
+	this._date = date;
+	// _localdate is a date object which is, in UTC, the desired local time.
+	// for example, if _date is 'Tue, 02 Apr 2013 21:30:44 GMT-0400 (EDT)'
+	// then _localdate is       'Tue, 02 Apr 2013 21:30:44 GMT'
+	offset *= 60 * 1000; /* convert from minutes to milliseconds */
+	this._localdate = new Date(date.getTime() - offset);
+};
+ParsoidDate.prototype.format = function(format) {
     var returnStr = '';
-    var replace = Date.replaceChars;
+    var replace = ParsoidDate.replaceChars;
     for (var i = 0; i < format.length; i++) {
 		var curChar = format.charAt(i);
 		if (i - 1 >= 0 && format.charAt(i - 1) === "\\") {
@@ -512,9 +561,55 @@ Date.prototype.format = function(format) {
     }
     return returnStr;
 };
+ParsoidDate.prototype.toString = function() {
+	return this.format('D, d M Y H:i:s O');
+};
+ParsoidDate.prototype.getTimezoneOffset = function() {
+	return (this._date.getTime() - this._localdate.getTime())/(60*1000);
+};
+var getJan1 = function(d) {
+	d = new Date(d.getTime());
+	d.setUTCMonth(0);
+	d.setUTCDate(1);
+	d.setUTCHours(0);
+	d.setUTCMinutes(0);
+	d.setUTCSeconds(0);
+	d.setUTCMilliseconds(0);
+	return d;
+};
+ParsoidDate.prototype.getWeek = function() {
+	var start = getJan1(this._localdate);
+	return Math.ceil((((this._localdate.valueOf() - start.valueOf()) / 86400000) + start.getUTCDay() + 1) / 7);
+};
+ParsoidDate.prototype.getWeekYear = function() { // ISO-8601 week year
+	var d = new Date(this._localdate);
+	d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3);
+	return d.getUTCFullYear();
+};
+ParsoidDate.prototype.getDayOfYear = function() {
+	var start = getJan1(this._localdate);
+	return Math.ceil((this._localdate.valueOf() - start.valueOf()) / 86400000);
+};
+// proxy certain methods of _date into ParsoidDate.
+['getUTCHours','getUTCMinutes','getUTCSeconds',
+ 'getTime','valueOf'].forEach(function(f) {
+	ParsoidDate.prototype[f] = function() {
+		var d = this._date;
+		return d[f].apply(d, arguments);
+	};
+});
+// local dates use UTC methods, but on _localdate
+['getHours', 'getMinutes', 'getSeconds', 'getMilliseconds',
+ 'getDate', 'getDay', 'getMonth', 'getFullYear'].forEach(function(f) {
+	var ff = f.replace('get', 'getUTC');
+	ParsoidDate.prototype[f] = function() {
+		var d = this._localdate;
+		return d[ff].apply(d, arguments);
+	};
+});
 
 // XXX: support localization
-Date.replaceChars = {
+ParsoidDate.replaceChars = {
     shortMonths: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug',
 					'Sep', 'Oct', 'Nov', 'Dec'],
     longMonths: ['January', 'February', 'March', 'April', 'May', 'June',
@@ -525,9 +620,9 @@ Date.replaceChars = {
 
     // Day
     d: function() { return (this.getDate() < 10 ? '0' : '') + this.getDate(); },
-    D: function() { return Date.replaceChars.shortDays[this.getDay()]; },
+    D: function() { return ParsoidDate.replaceChars.shortDays[this.getDay()]; },
     j: function() { return this.getDate(); },
-    l: function() { return Date.replaceChars.longDays[this.getDay()]; },
+    l: function() { return ParsoidDate.replaceChars.longDays[this.getDay()]; },
     N: function() { return this.getDay() + 1; },
     S: function() {
 		return (this.getDate() % 10 === 1 &&
@@ -536,34 +631,23 @@ Date.replaceChars = {
 					this.getDate() !== 13 ? 'rd' : 'th')));
 	},
     w: function() { return this.getDay(); },
-    z: function() {
-		var d = new Date(this.getFullYear(),0,1);
-		return Math.ceil((this - d) / 86400000);
-	},
+    z: function() { return this.getDayOfYear(); },
     // Week
-    W: function() {
-		var d = new Date(this.getFullYear(), 0, 1);
-		return Math.ceil((((this - d) / 86400000) + d.getDay() + 1) / 7);
-	},
+    W: function() { return this.getWeek(); },
     // Month
-    F: function() { return Date.replaceChars.longMonths[this.getMonth()]; },
+    F: function() { return ParsoidDate.replaceChars.longMonths[this.getMonth()]; },
     m: function() { return (this.getMonth() < 9 ? '0' : '') + (this.getMonth() + 1); },
-    M: function() { return Date.replaceChars.shortMonths[this.getMonth()]; },
+    M: function() { return ParsoidDate.replaceChars.shortMonths[this.getMonth()]; },
     n: function() { return this.getMonth() + 1; },
     t: function() {
-		var d = new Date();
-		return new Date(d.getFullYear(), d.getMonth(), 0).getDate();
+		return new Date(this.getFullYear(), this.getMonth()+1, 0).getDate();
 	},
     // Year
     L: function() {
 		var year = this.getFullYear();
 		return (year % 400 === 0 || (year % 100 !== 0 && year % 4 === 0));
 	},
-    o: function() {
-		var d  = new Date(this.valueOf());
-		d.setDate(d.getDate() - ((this.getDay() + 6) % 7) + 3);
-		return d.getFullYear();
-	},
+    o: function() { return this.getWeekYear(); },
     Y: function() { return this.getFullYear(); },
     y: function() { return ('' + this.getFullYear()).substr(2); },
     // Time
@@ -600,13 +684,7 @@ Date.replaceChars = {
 			(Math.abs(this.getTimezoneOffset() / 60) < 10 ? '0' : '') +
 			(Math.abs(this.getTimezoneOffset() / 60)) + ':00';
 	},
-    T: function() {
-		var m = this.getMonth();
-		this.setMonth(0);
-		var result = this.toTimeString().replace(/^.+ \(?([^\)]+)\)?$/, '$1');
-		this.setMonth(m);
-		return result;
-	},
+    T: function() { return "Not Yet Supported"; },
     Z: function() { return -this.getTimezoneOffset() * 60; },
     // Full Date/Time
     c: function() { return this.format("Y-m-d\\TH:i:sP"); },
@@ -631,11 +709,10 @@ ParserFunctions.prototype.pf_localurl = function ( token, frame, cb, args ) {
 					console.trace();
 					throw( err );
 				}
-				cb({ tokens: [ '/' +
+				cb({ tokens: [
 					// FIXME! Figure out correct prefix to use
-					//this.env.wgScriptPath +
-					'index' +
-					env.wgScriptExtension + '?title=' +
+					//this.env.conf.wiki.wgScriptPath +
+					env.conf.wiki.script + '?title=' +
 					env.normalizeTitle( target ) + '&' +
 					expandedArgs.join('&') ]
 				});
@@ -644,9 +721,7 @@ ParserFunctions.prototype.pf_localurl = function ( token, frame, cb, args ) {
 };
 
 
-/**
- * Stub section: Pick any of these and actually implement them!
- */
+/* Stub section: Pick any of these and actually implement them!  */
 
 // The page name and similar information should be carried around in
 // this.env
@@ -664,17 +739,17 @@ ParserFunctions.prototype.pf_pagenamee = function ( token, frame, cb, args ) {
 };
 ParserFunctions.prototype.pf_fullpagename = function ( token, frame, cb, args ) {
 	var target = args[0].k;
-	cb( { tokens: [target || this.env.pageName ] } );
+	cb( { tokens: [target || this.env.page.name || '' ] } );
 };
 ParserFunctions.prototype.pf_fullpagenamee = function ( token, frame, cb, args ) {
 	var target = args[0].k;
-	cb( { tokens: [ target || this.env.pageName ] } );
+	cb( { tokens: [ target || this.env.page.name || '' ] } );
 };
 // This should be doable with the information in the envirionment
 // (this.env) already.
 ParserFunctions.prototype.pf_fullurl = function ( token, frame, cb, args ) {
 	var target = args[0].k;
-	cb( { tokens: [ target || this.env.wgScriptPath + this.env.pageName || "http://example.com/fixme/" ] } );
+	cb( { tokens: [ target || this.env.conf.wiki.articlePath + this.env.page.name || "http://example.com/fixme/" ] } );
 };
 ParserFunctions.prototype.pf_urlencode = function ( token, frame, cb, args ) {
 	var target = args[0].k;
@@ -706,7 +781,17 @@ ParserFunctions.prototype.pf_protectionlevel = function ( token, frame, cb, args
 	cb( { tokens: [''] } );
 };
 ParserFunctions.prototype.pf_ns = function ( token, frame, cb, args ) {
-	var target = args[0].k;
+	var nsid, target = args[0].k, env = this.env;
+
+	if ( env.conf.wiki.namespaceIds[target.toLowerCase()] ) {
+		nsid = env.conf.wiki.namespaceIds[target.toLowerCase()];
+	} else if ( env.conf.wiki.canonicalNamespaces[target.toLowerCase()] ) {
+		nsid = env.conf.wiki.canonicalNamespaces[target.toLowerCase()];
+	}
+
+	if ( nsid !== undefined && env.conf.wiki.namespaceNames[nsid] ) {
+		target = env.conf.wiki.namespaceNames[nsid];
+	}
 	cb( { tokens: [target] } );
 };
 ParserFunctions.prototype.pf_subjectspace = function ( token, frame, cb, args ) {
@@ -736,17 +821,37 @@ ParserFunctions.prototype.pf_namespacee = function ( token, frame, cb, args ) {
 	var target = args[0].k;
 	cb( { tokens: [target.split(':').pop() || 'Main'] } );
 };
+ParserFunctions.prototype.pf_namespacenumber = function ( token, frame, cb, args ) {
+	var target = args[0].k.split(':').pop();
+	cb( { tokens: [this.env.conf.wiki.namespaceIds[target]] } );
+};
 ParserFunctions.prototype.pf_pagename = function ( token, frame, cb, args ) {
-	cb( { tokens: [this.env.pageName || ''] } );
+	cb( { tokens: [this.env.page.name || ''] } );
 };
 ParserFunctions.prototype.pf_pagenamebase = function ( token, frame, cb, args ) {
-	cb( { tokens: [this.env.pageName || ''] } );
+	cb( { tokens: [this.env.page.name || ''] } );
 };
 ParserFunctions.prototype.pf_scriptpath = function ( token, frame, cb, args ) {
-	cb( { tokens: [this.env.wgScriptPath] } );
+	cb( { tokens: [this.env.conf.wiki.wgScriptPath] } );
+};
+ParserFunctions.prototype.pf_server = function ( token, frame, cb, args ) {
+	var dataAttribs = Util.clone(token.dataAttribs);
+	cb( { tokens: [
+		new defines.TagTk('a', [
+			new defines.KV('rel', 'nofollow'),
+			new defines.KV('class', 'external free'),
+			new defines.KV('href', this.env.conf.wiki.server),
+			new defines.KV('typeof', 'mw:ExtLink/URL')
+		], dataAttribs),
+		this.env.conf.wiki.server,
+		new defines.EndTagTk('a')
+	] } );
+};
+ParserFunctions.prototype.pf_servername = function ( token, frame, cb, args ) {
+	cb( { tokens: [this.env.conf.wiki.server.replace(/^https?:\/\//,'')] } );
 };
 ParserFunctions.prototype.pf_talkpagename = function ( token, frame, cb, args ) {
-	cb( { tokens: [this.env.pageName.replace(/^[^:]:/, 'Talk:' ) || ''] } );
+	cb( { tokens: [this.env.page.name.replace(/^[^:]:/, 'Talk:' ) || ''] } );
 };
 
 // TODO: #titleparts, SUBJECTPAGENAME, BASEPAGENAME. SUBPAGENAME, DEFAULTSORT

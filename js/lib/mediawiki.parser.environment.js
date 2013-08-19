@@ -1,30 +1,23 @@
 "use strict";
 
-var Util = require('./mediawiki.Util.js').Util;
-var title = require('./mediawiki.Title.js'),
-	$ = require( 'jquery' ),
-	Title = title.Title,
-	Namespace = title.Namespace;
-
-var wikipedias = "en|de|fr|nl|it|pl|es|ru|ja|pt|zh|sv|vi|uk|ca|no|fi|cs|hu|ko|fa|id|tr|ro|ar|sk|eo|da|sr|lt|ms|eu|he|sl|bg|kk|vo|war|hr|hi|et|az|gl|simple|nn|la|th|el|new|roa-rup|oc|sh|ka|mk|tl|ht|pms|te|ta|be-x-old|ceb|br|be|lv|sq|jv|mg|cy|lb|mr|is|bs|yo|an|hy|fy|bpy|lmo|pnb|ml|sw|bn|io|af|gu|zh-yue|ne|nds|ku|ast|ur|scn|su|qu|diq|ba|tt|my|ga|cv|ia|nap|bat-smg|map-bms|wa|kn|als|am|bug|tg|gd|zh-min-nan|yi|vec|hif|sco|roa-tara|os|arz|nah|uz|sah|mn|sa|mzn|pam|hsb|mi|li|ky|si|co|gan|glk|ckb|bo|fo|bar|bcl|ilo|mrj|fiu-vro|nds-nl|tk|vls|se|gv|ps|rue|dv|nrm|pag|koi|pa|rm|km|kv|udm|csb|mhr|fur|mt|wuu|lij|ug|lad|pi|zea|sc|bh|zh-classical|nov|ksh|or|ang|kw|so|nv|xmf|stq|hak|ay|frp|frr|ext|szl|pcd|ie|gag|haw|xal|ln|rw|pdc|pfl|krc|crh|eml|ace|gn|to|ce|kl|arc|myv|dsb|vep|pap|bjn|as|tpi|lbe|wo|mdf|jbo|kab|av|sn|cbk-zam|ty|srn|kbd|lo|ab|lez|mwl|ltg|ig|na|kg|tet|za|kaa|nso|zu|rmy|cu|tn|chr|got|sm|bi|mo|bm|iu|chy|ik|pih|ss|sd|pnt|cdo|ee|ha|ti|bxr|om|ks|ts|ki|ve|sg|rn|dz|cr|lg|ak|tum|fj|st|tw|ch|ny|ff|xh|ng|ii|cho|mh|aa|kj|ho|mus|kr|hz";
-
-var interwikiMap = {};
-wikipedias.split('|').forEach( function (prefix) {
-	interwikiMap[prefix] = 'http://' + prefix + '.wikipedia.org/w';
-});
+var WikiConfig = require( './mediawiki.WikiConfig.js' ).WikiConfig,
+	ParsoidConfig = require( './mediawiki.ParsoidConfig.js' ).ParsoidConfig,
+	ConfigRequest = require( './mediawiki.ApiRequest.js' ).ConfigRequest,
+	$ = require( './fakejquery' ),
+	Title = require('./mediawiki.Title.js').Title;
 
 function Tracer(env) {
 	this.env = env;
 }
 Tracer.prototype = {
 	startPass: function(string) {
-		if (this.env.trace) {
+		if (this.env.conf.parsoid.trace) {
 			console.warn("---- start: " + string + " ----");
 		}
 	},
 
 	endPass: function(string) {
-		if (this.env.trace) {
+		if (this.env.conf.parsoid.trace) {
 			console.warn("---- end  : " + string + " ----");
 		}
 	},
@@ -34,8 +27,8 @@ Tracer.prototype = {
 			compact = true;
 		}
 
-		if (this.env.trace) {
-			if (token.constructor === String) {
+		if (this.env.conf.parsoid.trace) {
+			if (token.constructor === String || token.constructor === Number) {
 				console.warn("T: '" + token + "'");
 			} else  {
 				console.warn("T: " + token.toString(compact));
@@ -44,13 +37,13 @@ Tracer.prototype = {
 	},
 
 	output: function(string) {
-		if (this.env.trace) {
+		if (this.env.conf.parsoid.trace) {
 			console.warn(string);
 		}
 	},
 
 	outputChunk: function(chunk) {
-		if (this.env.trace) {
+		if (this.env.conf.parsoid.trace) {
 			console.warn("---- <chunk:tokenized> ----");
 			for (var i = 0, n = chunk.length; i < n; i++) {
 				console.warn(chunk[i].toString());
@@ -60,64 +53,183 @@ Tracer.prototype = {
 	}
 };
 
-var MWParserEnvironment = function(opts) {
-	var options = {
-		tagHooks: {},
-		parserFunctions: {},
-		pageCache: {}, // @fixme use something with managed space
-		debug: false,
-		trace: false,
-		wgScriptPath: "/wiki/",
-		wgScript: "/wiki/index.php",
-		wgUploadPath: "/wiki/images",
-		wgScriptExtension: ".php",
-		fetchTemplates: false,
-		maxDepth: 40,
-		pageName: 'Main page',
-		interwikiMap: interwikiMap,
-		interwikiRegexp: Object.keys(interwikiMap).join('|'),
-		uid: 1
+/**
+ * @class
+ *
+ * Holds configuration data that isn't modified at runtime, debugging objects,
+ * a page object that represents the page we're parsing, and more.
+ *
+ * @constructor
+ * @param {ParsoidConfig/null} parsoidConfig
+ * @param {WikiConfig/null} wikiConfig
+ */
+var MWParserEnvironment = function ( parsoidConfig, wikiConfig ) {
+	// page information
+	this.page = {
+		name: 'Main page',
+		relativeLinkPrefix: '',
+		id: null,
+		src: null,
+		dom: null,
+		ns: null,
+		title: null // a full Title object
 	};
-	// XXX: this should be namespaced
-	$.extend(options, opts);
-	$.extend(this, options);
 
-	this.setPageName( this.pageName );
+	// Configuration
+	this.conf = {};
+
+	// execution state
+	// TODO gwicke: probably not that useful any more as this is per-request
+	// and the PHP preprocessor eliminates template source hits
+	this.pageCache = {};
+	this.uid = 1;
+	// Global transclusion expansion cache (templates, parser functions etc)
+	// Key: Full transclusion source
+	this.transclusionCache = {};
+	// Global extension tag expansion cache (templates, parser functions etc)
+	// Key: Full extension source (including tags)
+	this.extensionCache = {};
+	// Global image expansion cache
+	// Key: Full image source
+	this.fileCache = {};
+
+	if ( !parsoidConfig ) {
+		// Global things, per-parser
+		parsoidConfig = new ParsoidConfig( null, null );
+	}
+
+	if ( !wikiConfig ) {
+		// Local things, per-wiki
+		wikiConfig = new WikiConfig( null, '' );
+	}
+
+	this.conf.wiki = wikiConfig;
+	this.conf.parsoid = parsoidConfig;
+
+	this.setPageName( this.page.name );
 
 	// Tracing object
 	this.tracer = new Tracer(this);
+
+	// Outstanding page requests (for templates etc)
+	this.requestQueue = {};
 };
 
-MWParserEnvironment.prototype.setInterwiki = function (prefix, wgScript) {
-	this.interwikiMap[prefix] = wgScript;
-	this.interwikiRegexp = Object.keys(this.interwikiMap).join('|');
-};
-MWParserEnvironment.prototype.removeInterwiki = function (prefix) {
-	delete this.interwikiMap[prefix];
-	this.interwikiRegexp = Object.keys(this.interwikiMap).join('|');
+// Cache for wiki configurations, shared between requests.
+MWParserEnvironment.prototype.confCache = {};
+
+/**
+ * @property {Object} page
+ * @property {string} page.name
+ * @property {String/null} page.src
+ * @property {Node/null} page.dom
+ * @property {string} page.relativeLinkPrefix
+ * Any leading ..?/ strings that will be necessary for building links.
+ * @property {Number/null} page.id
+ * The revision ID we want to use for the page.
+ */
+/**
+ * @method
+ *
+ * Set the src and optionally meta information for the page we're parsing.
+ *
+ * If the argument is a simple string, will clear metadata and just
+ * set this.page.src.  Otherwise, the provided metadata object should
+ * have fields corresponding to the JSON output given by
+ * action=query&prop=revisions on the MW API.  That is:
+ * <pre>
+ *  metadata = {
+ *    title: // normalized title (ie, spaces not underscores)
+ *    ns:    // namespace
+ *    id:    // page id
+ *    revision: {
+ *      revid:    // revision id
+ *      parentid: // revision parent
+ *      timestamp:
+ *      user:     // contributor username
+ *      userid:   // contributor user id
+ *      sha1:
+ *      size:     // in bytes
+ *      comment:
+ *      contentmodel:
+ *      contentformat:
+ *      "*":     // actual source text --> copied to this.page.src
+ *    }
+ *  }
+ * </pre>
+ *
+ * @param {String or Object} page source or metadata
+ */
+MWParserEnvironment.prototype.setPageSrcInfo = function ( src_or_metadata ) {
+	if (typeof(src_or_metadata)==='string' || src_or_metadata===null) {
+		this.page.meta = { revision: {} };
+		this.page.src = src_or_metadata;
+		return;
+	}
+	// I'm chosing to initialize this.page.meta "the hard way" (rather than
+	// simply cloning the provided object) in part to document/enforce the
+	// expected structure and fields.
+	var metadata = src_or_metadata;
+	var m = this.page.meta;
+	if (!m) { m = this.page.meta = {}; }
+	m.title = metadata.title;
+	m.ns = metadata.ns;
+	m.id = metadata.id;
+	var r = m.revision;
+	if (!r) { r = m.revision = {}; }
+	if (metadata.revision) {
+		r.revid = metadata.revision.revid;
+		r.parentid = metadata.revision.parentid;
+		r.timestamp = metadata.revision.timestamp;
+		r.user = metadata.revision.user;
+		r.userid = metadata.revision.userid;
+		r.sha1 = metadata.revision.sha1;
+		r.size = metadata.revision.size;
+		r.comment = metadata.revision.comment;
+		r.contentmodel = metadata.revision.contentmodel;
+		r.contentformat = metadata.revision.contentformat;
+		if ('*' in metadata.revision) {
+			this.page.src = metadata.revision['*'];
+		}
+	}
 };
 
-// Outstanding page requests (for templates etc)
-// Class-static
-MWParserEnvironment.prototype.requestQueue = {};
+/**
+ * @property {Object} conf
+ * @property {WikiConfig} conf.wiki
+ * @property {ParsoidConfig} conf.parsoid
+ */
 
+
+/**
+ * @method
+ *
+ * Set the name of the page we're parsing.
+ *
+ * @param {string} pageName
+ */
 MWParserEnvironment.prototype.setPageName = function ( pageName ) {
-	this.pageName = pageName;
+	// Create a title from the pageName
+	var title = Title.fromPrefixedText(this, pageName);
+	this.page.ns = title.ns.id;
+	this.page.title = title;
+
+	this.page.name = pageName;
 	// Construct a relative link prefix depending on the number of slashes in
 	// pageName
-	this.relativeLinkPrefix = '';
-	var slashMatches = this.pageName.match(/\//g),
+	this.page.relativeLinkPrefix = '';
+	var slashMatches = this.page.name.match(/\//g),
 		numSlashes = slashMatches ? slashMatches.length : 0;
 	if ( numSlashes ) {
 		while ( numSlashes ) {
-			this.relativeLinkPrefix += '../';
+			this.page.relativeLinkPrefix += '../';
 			numSlashes--;
 		}
 	} else {
 		// Always prefix a ./ so that we don't have to escape colons. Those
 		// would otherwise fool browsers into treating namespaces as
 		// protocols.
-		this.relativeLinkPrefix = './';
+		this.page.relativeLinkPrefix = './';
 	}
 };
 
@@ -133,61 +245,119 @@ MWParserEnvironment.prototype.setVariable = function( varname, value, options ) 
 };
 
 /**
- * @return MWParserFunction
+ * @method
+ * @static
+ *
+ * Alternate constructor for MWParserEnvironments
+ *
+ * @param {ParsoidConfig/null} parsoidConfig
+ * @param {WikiConfig/null} wikiConfig
+ * @param {string} prefix The interwiki prefix that corresponds to the wiki we should use
+ * @param {string} pageName
+ * @param {Function} cb
+ * @param {Error} cb.err
+ * @param {MWParserEnvironment} cb.env The finished environment object
  */
-MWParserEnvironment.prototype.getParserFunction = function( name ) {
-	if (name in this.parserFunctions) {
-		return new this.parserFunctions[name]( this );
-	} else {
-		return null;
+MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix, pageName, cb ) {
+	if ( !parsoidConfig ) {
+		parsoidConfig = new ParsoidConfig();
+		parsoidConfig.setInterwiki( 'mw', 'http://www.mediawiki.org/w/api.php' );
 	}
+
+	if ( !wikiConfig ) {
+		wikiConfig = new WikiConfig( null, null );
+	}
+
+	var env = new MWParserEnvironment( parsoidConfig, wikiConfig );
+
+	if ( pageName ) {
+		env.setPageName( pageName );
+	}
+
+	// Get that wiki's config
+	env.switchToConfig( prefix, function ( err ) {
+		cb( err, env );
+	} );
 };
 
 /**
- * @return MWParserTagHook
+ * Function that switches to a different configuration for a different wiki.
+ * Caches all configs so we only need to get each one once (if we do it right)
+ *
+ * @param {string} prefix The interwiki prefix that corresponds to the wiki we should use
+ * @param {Function} cb
+ * @param {Error} cb.err
  */
-MWParserEnvironment.prototype.getTagHook = function( name ) {
-	if (name in this.tagHooks) {
-		return new this.tagHooks[name](this);
-	} else {
-		return null;
-	}
-};
+MWParserEnvironment.prototype.switchToConfig = function ( prefix, cb ) {
 
-
-MWParserEnvironment.prototype.makeTitleFromPrefixedText = function ( text ) {
-	text = this.normalizeTitle( text );
-	var nsText = text.split( ':', 1 )[0];
-	if ( nsText && nsText !== text ) {
-		var _ns = new Namespace(0);
-		var ns = _ns._defaultNamespaceIDs[ nsText.toLowerCase() ];
-		//console.warn( JSON.stringify( [ nsText, ns ] ) );
-		if ( ns !== undefined ) {
-			return new Title( text.substr( nsText.length + 1 ), ns, nsText, this );
-		} else {
-			return new Title( text, 0, '', this );
+	function setupWikiConfig(env, apiURI, error, config) {
+		if ( error === null ) {
+			env.conf.wiki = new WikiConfig( config, prefix, apiURI );
+			env.confCache[prefix] = env.conf.wiki;
 		}
+
+		cb( error );
+	}
+
+	if (!prefix) {
+		console.error("ERROR: No prefix provided!");
+		cb(new Error("Wiki prefix not provided"));
+		return;
+	}
+
+	var uri = this.conf.parsoid.interwikiMap[prefix];
+	if (!uri) {
+		// SSS: Ugh! Looks like parser tests use a prefix
+		// that is not part of the interwikiMap -- so we
+		// cannot crash with an error.  Hence defaulting
+		// to enwiki api which is quite odd.  Does the
+		// interwikiMap need updating or is this use-case
+		// valid outside of parserTests??
+		console.error("ERROR: Did not find api uri for " + prefix + "; defaulting to en");
+		uri = this.conf.parsoid.interwikiMap.en;
+	}
+
+	this.conf.parsoid.apiURI = uri;
+
+	if ( this.confCache[prefix] ) {
+		this.conf.wiki = this.confCache[prefix];
+		cb( null );
+	} else if ( this.conf.parsoid.fetchConfig ) {
+		var confRequest = new ConfigRequest( uri, this );
+		confRequest.on( 'src', setupWikiConfig.bind(null, this, uri));
 	} else {
-		return new Title( text, 0, '', this );
+		// Load the config from cached config on disk
+		var localConfigFile = './baseconfig/' + prefix + '.json',
+			localConfig = require(localConfigFile);
+
+		if (localConfig && localConfig.query) {
+			setupWikiConfig(this, uri, null, localConfig.query);
+		} else {
+			cb(new Error("Could not read valid config from file: " + localConfigFile));
+		}
 	}
 };
-
 
 // XXX: move to Title!
-MWParserEnvironment.prototype.normalizeTitle = function( name ) {
+MWParserEnvironment.prototype.normalizeTitle = function( name, noUnderScores,
+		preserveLeadingColon )
+{
 	if (typeof name !== 'string') {
 		throw new Error('nooooooooo not a string');
 	}
 	var forceNS, self = this;
 	if ( name.substr( 0, 1 ) === ':' ) {
-		forceNS = ':';
+		forceNS = preserveLeadingColon ? ':' : '';
 		name = name.substr(1);
 	} else {
 		forceNS = '';
 	}
 
 
-	name = name.trim().replace(/[\s_]+/g, '_');
+	name = name.trim();
+	if ( ! noUnderScores ) {
+		name = name.replace(/[\s_]+/g, '_');
+	}
 
 	// Implement int: as alias for MediaWiki:
 	if ( name.substr( 0, 4 ) === 'int:' ) {
@@ -205,14 +375,14 @@ MWParserEnvironment.prototype.normalizeTitle = function( name ) {
 		var nsMatch = name.match( /^([a-zA-Z\-]+):/ ),
 			ns = nsMatch && nsMatch[1] || '';
 		if( ns !== '' && ns !== name ) {
-			if ( self.interwikiMap[ns.toLowerCase()] ) {
+			if ( self.conf.parsoid.interwikiMap[ns.toLowerCase()] ) {
 				forceNS += ns + ':';
 				name = name.substr( nsMatch[0].length );
 				splitNS();
 			} else {
 				name = upperFirst( ns ) + ':' + upperFirst( name.substr( ns.length + 1 ) );
 			}
-		} else {
+		} else if ( !self.conf.wiki.caseSensitive ) {
 			name = upperFirst( name );
 		}
 	}
@@ -225,30 +395,38 @@ MWParserEnvironment.prototype.normalizeTitle = function( name ) {
 };
 
 /**
- * @fixme do this for real eh
+ * TODO: Handle namespaces relative links like [[User:../../]] correctly, they
+ * shouldn't be treated like links at all.
  */
 MWParserEnvironment.prototype.resolveTitle = function( name, namespace ) {
-	// Resolve subpages
-	var relUp = name.match(/^(\.\.\/)+/);
-	if ( relUp ) {
-		var levels = relUp[0].length / 3,
-			titleBits = this.pageName.split(/\//),
-			newBits = titleBits.slice(0, titleBits.length - levels);
-		if ( name !== relUp[0] ) {
-			newBits.push( name.substr(levels * 3) );
+	// Default to main namespace
+	namespace = namespace || 0;
+	if ( /^#/.test( name ) ) {
+		// resolve lonely fragments (important if this.page is a subpage,
+		// otherwise the relative link will be wrong)
+		name = this.page.name + name;
+	}
+	if ( this.conf.wiki.namespacesWithSubpages[namespace] ) {
+		// Resolve subpages
+		var relUp = name.match(/^(\.\.\/)+/);
+		if ( relUp ) {
+			var levels = relUp[0].length / 3, // Levels are indicated by '../'.
+			    titleBits = this.page.name.split( /\// ),
+			    newBits = titleBits.slice( 0, titleBits.length - levels );
+			if ( name !== relUp[0] ) {
+				newBits.push( name.substr( levels * 3 ) );
+			}
+			name = this.normalizeTitle( newBits.join('/') );
 		}
-		name = newBits.join('/');
-		//console.log( relUp, name );
+
+		// Resolve absolute subpage links
+		if ( name.length && name[0] === '/' ) {
+			// Remove final slash if present.
+			name = name.replace( /\/$/, '' );
+			name = this.normalizeTitle( this.page.name + name );
+		}
 	}
 
-	if ( name.length && name[0] === '/' ) {
-		name = this.normalizeTitle( this.pageName ) + name;
-	}
-	// FIXME: match against proper list of namespaces
-	if ( name.indexOf(':') === -1 && namespace ) {
-		// hack hack hack
-		name = namespace + ':' + this.normalizeTitle( name );
-	}
 	// Strip leading ':'
 	if (name[0] === ':') {
 		name = name.substr( 1 );
@@ -261,7 +439,7 @@ MWParserEnvironment.prototype.resolveTitle = function( name, namespace ) {
  * Simple debug helper
  */
 MWParserEnvironment.prototype.dp = function ( ) {
-	if ( this.debug ) {
+	if ( this.conf.parsoid.debug ) {
 		if ( arguments.length > 1 ) {
 			try {
 				console.warn( JSON.stringify( arguments, null, 2 ) );
@@ -293,7 +471,7 @@ MWParserEnvironment.prototype.ap = function ( ) {
  * Simple debug helper, trace-only
  */
 MWParserEnvironment.prototype.tp = function ( ) {
-	if ( this.debug || this.trace ) {
+	if ( this.conf.parsoid.debug || this.conf.parsoid.trace ) {
 		if ( arguments.length > 1 ) {
 			console.warn( JSON.stringify( arguments, null, 2 ) );
 		} else {
@@ -303,7 +481,12 @@ MWParserEnvironment.prototype.tp = function ( ) {
 };
 
 /**
+ * @method
+ * @private
+ *
  * Generate a UID
+ *
+ * @returns {number}
  */
 MWParserEnvironment.prototype.generateUID = function () {
 	return this.uid++;
@@ -313,8 +496,16 @@ MWParserEnvironment.prototype.newObjectId = function () {
 	return "mwt" + this.generateUID();
 };
 
+MWParserEnvironment.prototype.newAboutId = function () {
+	return "#" + this.newObjectId();
+};
+
 MWParserEnvironment.prototype.stripIdPrefix = function(aboutId) {
-	return aboutId.replace(/#?mwt/, '');
+	return aboutId.replace(/^#?mwt/, '');
+};
+
+MWParserEnvironment.prototype.isParsoidObjectId = function(aboutId) {
+	return aboutId.match(/^#mwt/);
 };
 
 /**
@@ -323,9 +514,13 @@ MWParserEnvironment.prototype.stripIdPrefix = function(aboutId) {
  *
  * For best results, define your own. For better results,
  * call it from places you notice errors happening.
+ *
+ * @template
+ * @param {Error} error
  */
 MWParserEnvironment.prototype.errCB = function ( error ) {
-	console.log( 'ERROR in ' + this.pageName + ':\n' + error.stack );
+	console.log( 'ERROR in ' + this.page.name + ':\n' + error.message);
+	console.log("Stack trace: " + error.stack);
 	process.exit( 1 );
 };
 
@@ -333,4 +528,3 @@ MWParserEnvironment.prototype.errCB = function ( error ) {
 if (typeof module === "object") {
 	module.exports.MWParserEnvironment = MWParserEnvironment;
 }
-

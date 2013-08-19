@@ -1,4 +1,3 @@
-"use strict";
 /**
  * This module assembles parser pipelines from parser stages with
  * asynchronous communnication between stages based on events. Apart from the
@@ -8,29 +7,23 @@
  * See http://www.mediawiki.org/wiki/Parsoid and
  * http://www.mediawiki.org/wiki/Parsoid/Token_stream_transformations
  * for illustrations of the pipeline architecture.
- *
- * @author Gabriel Wicke <gwicke@wikimedia.org>
- * @author Neil Kandalgaonkar <neilk@wikimedia.org>
  */
+"use strict";
 
 // make this global for now
 // XXX: figure out a way to get away without a global for PEG actions!
-var $ = require('jquery'),
-	events = require( 'events' ),
-
-	fs = require('fs'),
-	path = require('path'),
+var $ = require('./fakejquery'),
 	PegTokenizer = require('./mediawiki.tokenizer.peg.js').PegTokenizer,
 	TokenTransformManager = require('./mediawiki.TokenTransformManager.js'),
 	SyncTokenTransformManager = TokenTransformManager.SyncTokenTransformManager,
 	AsyncTokenTransformManager = TokenTransformManager.AsyncTokenTransformManager,
-
+	ExtensionHandler = require('./ext.core.ExtensionHandler.js').ExtensionHandler,
 	NoIncludeOnly = require('./ext.core.NoIncludeOnly.js'),
 	IncludeOnly = NoIncludeOnly.IncludeOnly,
 	NoInclude = NoIncludeOnly.NoInclude,
 	OnlyInclude	= NoIncludeOnly.OnlyInclude,
-	ExtensionContent = require('./ext.ExtensionContentCollector.js').ExtensionContent,
 	QuoteTransformer = require('./ext.core.QuoteTransformer.js').QuoteTransformer,
+	TokenStreamPatcher = require('./ext.core.TokenStreamPatcher.js').TokenStreamPatcher,
 	PreHandler = require('./ext.core.PreHandler.js').PreHandler,
 	ParagraphWrapper = require('./ext.core.ParagraphWrapper.js').ParagraphWrapper,
 	Sanitizer = require('./ext.core.Sanitizer.js').Sanitizer,
@@ -40,12 +33,13 @@ var $ = require('jquery'),
 	LinkHandler = require('./ext.core.LinkHandler.js'),
 	WikiLinkHandler	= LinkHandler.WikiLinkHandler,
 	ExternalLinkHandler	= LinkHandler.ExternalLinkHandler,
-	Cite = require('./ext.Cite.js').Cite,
-	BehaviorSwitchHandler = require('./ext.core.BehaviorSwitchHandler.js').BehaviorSwitchHandler,
-	TreeBuilder = require('./mediawiki.HTML5TreeBuilder.node.js')
-													.FauxHTML5.TreeBuilder,
+	BehaviorSwitch = require('./ext.core.BehaviorSwitchHandler.js'),
+	BehaviorSwitchHandler = BehaviorSwitch.BehaviorSwitchHandler,
+	BehaviorSwitchPreprocessor = BehaviorSwitch.BehaviorSwitchPreprocessor,
+	TreeBuilder = require('./mediawiki.HTML5TreeBuilder.node.js').FauxHTML5.TreeBuilder,
 	DOMPostProcessor = require('./mediawiki.DOMPostProcessor.js').DOMPostProcessor;
 
+var ParserPipeline; // forward declaration
 
 function ParserPipelineFactory ( env ) {
 	this.pipelineCache = {};
@@ -62,6 +56,7 @@ function ParserPipelineFactory ( env ) {
  * Should perhaps be moved to mediawiki.parser.environment.js, so that all
  * configuration can be found in a single place.
  */
+
 ParserPipelineFactory.prototype.recipes = {
 	// The full wikitext pipeline
 	'text/x-mediawiki/full': [
@@ -91,7 +86,9 @@ ParserPipelineFactory.prototype.recipes = {
 				OnlyInclude,	// 0.01
 				IncludeOnly,	// 0.02
 				NoInclude,		// 0.03
-				ExtensionContent, // 0.04
+
+				// Preprocess behavior switches
+				BehaviorSwitchPreprocessor // 0.05
 			]
 		],
 		/*
@@ -107,14 +104,13 @@ ParserPipelineFactory.prototype.recipes = {
 			[ 2, 'tokens/x-mediawiki' ],
 			[
 				// PHASE RANGE: [1,2)
-
 				TemplateHandler,	// 1.1
-				/* ExtensionHandler1, */ // using SFH_OBJECT_ARGS in PHP
+				ExtensionHandler,   // 1.11
 
 				// Expand attributes after templates to avoid expanding unused branches
 				// No expansion of quotes, paragraphs etc in attributes, as in
 				// PHP parser- up to text/x-mediawiki/expanded only.
-				AttributeExpander,	// 1.11
+				AttributeExpander,	// 1.12
 
 				// now all attributes expanded to tokens or string
 
@@ -138,46 +134,33 @@ ParserPipelineFactory.prototype.recipes = {
 		// overhead for unused transforms.
 		[
 			SyncTokenTransformManager,
+				// PHASE RANGE: [2,3)
 			[ 3, 'tokens/x-mediawiki/expanded' ],
 			[
-				// PHASE RANGE: [2,3)
+				TokenStreamPatcher,     // 2.001 -- 2.003
+					// add <pre>s
+				PreHandler,             // 2.051 -- 2.054
+				QuoteTransformer,       // 2.1
+					// add before transforms that depend on behavior switches
+					// examples: toc generation, edit sections
+				BehaviorSwitchHandler,  // 2.14
 
-				// Cite should be the first thing to run so the <ref>-</ref>
-				// content tokens are pulled out of the token stream and
-				// dont pollute the main token stream with any unbalanced
-				// tags/pres and the like.
-				Cite,				// 2.01
-
-				// Introduce <pre>s
-				PreHandler,			// 2.02
-
-
-				QuoteTransformer,	// 2.1
-
-				// before transforms that depend on behavior switches
-				// examples: toc generation, edit sections
-				BehaviorSwitchHandler,	// 2.14
-
-				ListHandler,		// 2.49
-
-				Sanitizer,          // 2.99
-
-				// Wrap tokens into paragraphs post-sanitization so that
-				// tags that converted to text by the sanitizer have a chance
-				// of getting wrapped into paragraphs.  The sanitizer does not
-				// require the existence of p-tags for its functioning.
-				ParagraphWrapper // 2.9995
-
-				// SkipperUnpacker
+				ListHandler,            // 2.49
+				Sanitizer,              // 2.90, 2.91
+					// Wrap tokens into paragraphs post-sanitization so that
+					// tags that converted to text by the sanitizer have a chance
+					// of getting wrapped into paragraphs.  The sanitizer does not
+					// require the existence of p-tags for its functioning.
+				ParagraphWrapper        // 2.95 -- 2.97
 			]
 		],
 
 		// Build a tree out of the fully processed token stream
 		[ TreeBuilder, [] ],
 
-		/**
-		* Final processing on the HTML DOM.
-		*/
+		/*
+		 * Final processing on the HTML DOM.
+		 */
 
 		/* Generic DOM transformer.
 		* This currently performs minor tree-dependent clean up like wrapping
@@ -237,10 +220,27 @@ ParserPipelineFactory.prototype.makePipeline = function( type, options ) {
 			// call the constructor
 			stageData[0].apply( stage, [ this.env, options, this ].concat( stageData[1] ) );
 			if ( stageData.length >= 3 ) {
+				// FIXME: This code here adds the 'transformers' property to every stage
+				// behind the back of that stage.  There are two alternatives to this:
+				//
+				// 1. Add 'recordTransformer' and 'getTransformers' functions to every stage.
+				//    But, seems excessive compared to current approach where the stages
+				//    aren't concerned with unnecessary details of state maintained for
+				//    the purposes of top-level orchestration.
+				// 2. Alternatively, we could also maintain this information as a separate
+				//    object rather than tack it onto '.transformers' property of each stage.
+				//    this.stageTransformers = [
+				//      [stage1-transformers],
+				//      [stage2-transformers],
+				//      ...
+				//    ];
+
+				stage.transformers = [];
 				// Create (and implicitly register) transforms
 				var transforms = stageData[2];
-				for ( var t = 0; t < transforms.length; t++ ) {
-					new transforms[t](stage , options);
+				for ( var j = 0; j < transforms.length; j++ ) {
+					var t = new transforms[j](stage , options);
+					stage.transformers.push(t);
 				}
 			}
 		}
@@ -253,12 +253,10 @@ ParserPipelineFactory.prototype.makePipeline = function( type, options ) {
 	}
 	//console.warn( 'stages' + stages + JSON.stringify( stages ) );
 	return new ParserPipeline(
-			stages[0],
-			stages[stages.length - 1],
-			options.cacheType ? this.returnPipeline.bind( this, options.cacheType )
-						: null,
-			this.env
-			);
+		stages,
+		options.cacheType ? this.returnPipeline.bind( this, options.cacheType ) : null,
+		this.env
+	);
 };
 
 function getCacheKey(cacheType, options) {
@@ -267,6 +265,15 @@ function getCacheKey(cacheType, options) {
 	}
 	if ( ! options.wrapTemplates ) {
 		cacheType += '::noWrap';
+	}
+	if ( options.inBlockToken ) {
+		cacheType += '::inBlockToken';
+	}
+	if ( options.inTemplate ) {
+		cacheType += '::inTemplate';
+	}
+	if ( options.extTag ) {
+		cacheType += '::'+options.extTag;
 	}
 	return cacheType;
 }
@@ -286,8 +293,7 @@ ParserPipelineFactory.prototype.getPipeline = function ( type, options ) {
 		options.isInclude = true;
 	}
 
-	var pipe,
-		cacheType = getCacheKey(type, options);
+	var cacheType = getCacheKey(type, options);
 	if ( ! this.pipelineCache[cacheType] ) {
 		this.pipelineCache[cacheType] = [];
 	}
@@ -314,16 +320,17 @@ ParserPipelineFactory.prototype.returnPipeline = function ( type, pipe ) {
 };
 
 
-/******************** ParserPipeline ****************************/
+/* ******************* ParserPipeline *************************** */
 
 /**
  * Wrap some stages into a pipeline. The last member of the pipeline is
  * supposed to emit events, while the first is supposed to support a process()
  * method that sets the pipeline in motion.
  */
-function ParserPipeline ( first, last, returnToCacheCB, env ) {
-	this.first = first;
-	this.last = last;
+ParserPipeline = function( stages, returnToCacheCB, env ) {
+	this.stages = stages;
+	this.first = stages[0];
+	this.last = stages.last();
 	this.env = env;
 
 	if ( returnToCacheCB ) {
@@ -335,7 +342,69 @@ function ParserPipeline ( first, last, returnToCacheCB, env ) {
 		// add a callback to return the pipeline back to the cache
 		this.last.addListener( 'end', this.returnToCacheCB );
 	}
-}
+};
+
+/*
+ * Applies the function across all stages and transformers registered at each stage
+ */
+ParserPipeline.prototype._applyToStage = function(fn, args) {
+	// Apply to each stage
+	this.stages.map(function(stage) {
+		if (stage[fn] && stage[fn].constructor === Function) {
+			stage[fn].apply(stage, args);
+		}
+		// Apply to each registered transformer for this stage
+		if (stage.transformers) {
+			stage.transformers.map(function(t) {
+				if (t[fn] && t[fn].constructor === Function) {
+					t[fn].apply(t, args);
+				}
+			});
+		}
+	});
+
+	// Apply to all known native extensions
+	var nativeExts = this.env.conf.parsoid.nativeExtensions;
+	Object.keys(nativeExts).map(function(extName) {
+		var ext = nativeExts[extName];
+		if (ext[fn] && ext[fn].constructor === Function) {
+			ext[fn].apply(ext, args);
+		}
+	});
+};
+
+/**
+ * This is primarily required to reset native extensions
+ * which might have be shared globally per parsing environment
+ * (unlike pipeline stages and transformers that exist one per
+ * pipeline). So, cannot rely on 'end' event to reset pipeline
+ * because there will be one 'end' event per pipeline.
+ *
+ * Ex: cite needs to maintain a global sequence across all
+ * template transclusion pipelines, extension, and top-level
+ * pipelines.
+ *
+ * This lets us reuse pipelines to parse unrelated top-level pages
+ * Ex: parser tests. Currently only parser tests exercise
+ * this functionality.
+ */
+ParserPipeline.prototype.resetState = function() {
+	this._applyToStage("resetState", []);
+};
+
+/**
+ * Set source offsets for the source that this pipeline will process
+ *
+ * This lets us use different pipelines to parse fragments of the same page
+ * Ex: extension content (found on the same page) is parsed with a different
+ * pipeline than the top-level page.
+ *
+ * Because of this, the source offsets are not [0, page.length) always
+ * and needs to be explicitly initialized
+ */
+ParserPipeline.prototype.setSourceOffsets = function(start, end) {
+	this._applyToStage("setSourceOffsets", [start, end]);
+};
 
 /**
  * Feed input tokens to the first pipeline stage
@@ -349,11 +418,27 @@ ParserPipeline.prototype.process = function(input, key) {
 };
 
 /**
+ * Feed input tokens to the first pipeline stage
+ */
+ParserPipeline.prototype.processToplevelDoc = function(input) {
+	try {
+		// Reset pipeline state once per top-level doc.
+		// This clears state from any per-doc global state
+		// maintained across all pipelines used by the document.
+		// (Ex: Cite state)
+		this.resetState();
+		return this.first.process(input);
+	} catch ( err ) {
+		this.env.errCB( err );
+	}
+};
+
+/**
  * Set the frame on the last pipeline stage (normally the
  * AsyncTokenTransformManager).
  */
 ParserPipeline.prototype.setFrame = function(frame, title, args) {
-	return this.last.setFrame(frame, title, args);
+	return this._applyToStage("setFrame", [frame, title, args]);
 };
 
 /**

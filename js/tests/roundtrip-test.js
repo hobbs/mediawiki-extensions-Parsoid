@@ -1,18 +1,18 @@
-( function () {
-var fs = require( 'fs' ),
-	path = require( 'path' ),
-	colors = require( 'colors' ),
-	http = require( 'http' ),
-	jsDiff = require( 'diff' ),
+#!/usr/bin/env node
+"use strict";
+
+var jsDiff = require( 'diff' ),
 	optimist = require( 'optimist' ),
+	domino = require( 'domino' ),
 
 	Util = require( '../lib/mediawiki.Util.js' ).Util,
+	DU = require( '../lib/mediawiki.DOMUtils.js' ).DOMUtils,
 	WikitextSerializer = require( '../lib/mediawiki.WikitextSerializer.js').WikitextSerializer,
 	TemplateRequest = require( '../lib/mediawiki.ApiRequest.js' ).TemplateRequest,
+	ParsoidConfig = require( '../lib/mediawiki.ParsoidConfig' ).ParsoidConfig,
+	MWParserEnvironment = require( '../lib/mediawiki.parser.environment.js' ).MWParserEnvironment;
 
-callback, argv, title,
-
-plainCallback = function ( page, err, results ) {
+var plainCallback = function ( env, err, results ) {
 	var i, result, output = '',
 		semanticDiffs = 0, syntacticDiffs = 0,
 		testDivider = ( new Array( 70 ) ).join( '=' ) + '\n',
@@ -54,12 +54,14 @@ plainCallback = function ( page, err, results ) {
 	}
 
 	return output;
-},
+};
 
-xmlCallback = function ( page, err, results ) {
-	var i, result,
+var xmlCallback = function ( env, err, results ) {
+	var i, result;
+	var prefix = ( env && env.wiki && env.wiki.iwp ) || '';
+	var title = ( env && env.page && env.page.name ) || '';
 
-	output = '<testsuite name="Roundtrip article ' + Util.encodeXml( page || '' ) + '">';
+	var output = '<testsuite name="Roundtrip article ' + Util.encodeXml( prefix + ':' + title ) + '">';
 
 	if ( err ) {
 		output += '<testcase name="entire article"><error type="parserFailedToFinish">';
@@ -70,7 +72,7 @@ xmlCallback = function ( page, err, results ) {
 		for ( i = 0; i < results.length; i++ ) {
 			result = results[i];
 
-			output += '<testcase name="' + Util.encodeXml( page ) + ' character ' + result.offset[0].start + '">';
+			output += '<testcase name="' + Util.encodeXml( prefix + ':' + title ) + ' character ' + result.offset[0].start + '">';
 
 			if ( result.type === 'fail' ) {
 				output += '<failure type="significantHtmlDiff">\n';
@@ -97,184 +99,179 @@ xmlCallback = function ( page, err, results ) {
 	output += '</testsuite>\n';
 
 	return output;
-},
+};
 
-findDsr = function () {
-var currentOffset, wasWaiting = false, waitingForEndMatch = false;
-return function ( element, targetRange, sourceLen, resetCurrentOffset ) {
-	var j, childNode, childAttribs, attribs, elesOnOffset, currentPreText, start, end,
-		elements = [], preText = [];
+var findMatchingNodes = function (root, targetRange, sourceLen) {
+	var currentOffset = null, wasWaiting = false, waitingForEndMatch = false;
 
-	if ( resetCurrentOffset ) {
-		currentOffset = null;
-		wasWaiting = false;
-		waitingForEndMatch = false;
-	}
+	function walkDOM(element) {
+		var elements = [],
+			precedingNodes = [],
+			attribs = DU.getJSONAttribute(element, 'data-parsoid');
 
-	if ( element ) {
-		attribs = element.getAttribute( 'data-parsoid' );
-		if ( attribs ) {
-			attribs = JSON.parse( attribs );
-		}
-	}
+		if ( attribs.dsr && attribs.dsr.length ) {
+			var start = attribs.dsr[0] || 0,
+				end = attribs.dsr[1] || sourceLen - 1;
 
-	if ( attribs && attribs.dsr && attribs.dsr.length ) {
-		start = attribs.dsr[0] || 0;
-		end = attribs.dsr[1] || sourceLen - 1;
-
-		if ( waitingForEndMatch ) {
-			if ( end >= targetRange.end ) {
-				waitingForEndMatch = false;
+			if ( (targetRange.end - 1) < start  || targetRange.start > (end - 1) ) {
+				return null;
 			}
-			return [ element ];
-		}
 
-		if ( attribs.dsr[0] && targetRange.start === start && end === targetRange.end ) {
-			return [ element ];
-		} else if ( targetRange.start === start ) {
-			waitingForEndMatch = true;
-		}
-
-		if ( targetRange.end < start || targetRange.start > end ) {
-			return null;
-		}
-	}
-
-	var children = element.childNodes;
-	for ( j = 0; j < children.length; j++ ) {
-		var c = children[j];
-		if (!c) {
-			// FIXME: why would this be anyway?
-			continue;
-		}
-
-		wasWaiting = waitingForEndMatch;
-		if ( c.nodeType === c.ELEMENT_NODE ) {
-			childNode = findDsr( c, targetRange, sourceLen );
-			if ( childNode ) {
-				elesOnOffset = [];
-
-				if ( !currentOffset && attribs.dsr && attribs.dsr[0] ) {
-					currentOffset = attribs.dsr[0];
-					while ( preText.length > 0 && currentOffset >= targetRange.start ) {
-						currentPreText = preText.pop();
-						if ( currentPreText.nodeValue.length > currentOffset - targetRange.start ) {
-							break;
-						}
-						currentOffset -= currentPreText.nodeValue.length;
-						elesOnOffset.push( currentPreText );
-					}
-					elesOnOffset.reverse();
-					childNode = elesOnOffset.concat( childNode );
-				}
-
-				// Check if there's only one child, and make sure it's a node with getAttribute
-				if ( childNode.length === 1 && childNode[0].getAttribute ) {
-					childAttribs = childNode[0].getAttribute( 'data-parsoid' );
-					if ( childAttribs ) {
-						childAttribs = JSON.parse( childAttribs );
-						if ( childAttribs.dsr && childAttribs.dsr[1] >= targetRange.end ) {
-							currentOffset = null;
-							preText = [];
-						} else if ( childAttribs.dsr ) {
-							currentOffset = childAttribs.dsr[1] || currentOffset;
-						}
-					}
-				}
-
-				elements = elements.concat( childNode );
-			}
-		} else if ( c.nodeType === c.TEXT_NODE || c.nodeType === c.COMMENT_NODE ) {
-			if ( currentOffset && ( currentOffset < targetRange.end ) ) {
-				currentOffset += c.nodeValue.length;
-				if ( c.nodeType === c.COMMENT_NODE ) {
-					// Add the length of the '<!--' and '--> bits
-					currentOffset += 7;
-				}
-				elements = elements.concat( [ c ] );
-				if ( wasWaiting && currentOffset >= targetRange.end ) {
+			if ( waitingForEndMatch ) {
+				if ( end >= targetRange.end ) {
 					waitingForEndMatch = false;
 				}
-			} else if ( !currentOffset ) {
-				preText.push( c );
+				return { done: true, nodes: [element] };
+			}
+
+			if ( attribs.dsr[0] !== null && targetRange.start === start && end === targetRange.end ) {
+				return { done: true, nodes: [element] };
+			} else if ( targetRange.start === start ) {
+				waitingForEndMatch = true;
+				if (end < targetRange.end) {
+					// No need to walk children
+					return { done: false, nodes: [element] };
+				}
+			} else if (start > targetRange.start && end < targetRange.end) {
+				// No need to walk children
+				return { done: false, nodes: [element] };
 			}
 		}
 
-		if ( wasWaiting && !waitingForEndMatch ) {
-			break;
-		}
-	}
+		var c = element.firstChild;
+		while (c) {
+			wasWaiting = waitingForEndMatch;
+			if ( DU.isElt(c) ) {
+				var res = walkDOM(c);
+				var matchedChildren = res ? res.nodes : null;
+				if ( matchedChildren ) {
+					if ( !currentOffset && attribs.dsr && (attribs.dsr[0] !== null) ) {
+						var elesOnOffset = [];
+						currentOffset = attribs.dsr[0];
+						// Walk the preceding nodes without dsr values and prefix matchedChildren
+						// till we get the desired matching start value.
+						var diff = currentOffset - targetRange.start;
+						while ( precedingNodes.length > 0 && diff > 0 ) {
+							var n = precedingNodes.pop();
+							var len = n.nodeValue.length + (n.nodeType === c.COMMENT_NODE ? 7 : 0);
+							if ( len > diff ) {
+								break;
+							}
+							diff -= len;
+							elesOnOffset.push( n );
+						}
+						elesOnOffset.reverse();
+						matchedChildren = elesOnOffset.concat( matchedChildren );
+					}
 
-	var numElements = elements.length;
-	var numChildren = children.length;
-	if ( numElements > 0 && numElements < numChildren ) {
-		return elements;
-/*	} else if ( attribs && attribs.dsr && attribs.dsr.length ) {
-		return [ element ]; */
-	} else if ( numChildren > 0 && numElements === numChildren ) {
-		return [ element ];
-	} else {
-		return null;
-	}
-};
-}(),
+					// Check if there's only one child, and make sure it's a node with getAttribute
+					if ( matchedChildren.length === 1 && DU.isElt(matchedChildren[0]) ) {
+						var childAttribs = matchedChildren[0].getAttribute( 'data-parsoid' );
+						if ( childAttribs ) {
+							childAttribs = JSON.parse( childAttribs );
+							if ( childAttribs.dsr && childAttribs.dsr[1]) {
+								if ( childAttribs.dsr[1] >= targetRange.end ) {
+									res.done = true;
+								} else {
+									currentOffset = childAttribs.dsr[1];
+								}
+							}
+						}
+					}
 
+					if (res.done) {
+						res.nodes = matchedChildren;
+						return res;
+					} else {
+						elements = matchedChildren;
+					}
+				} else if (wasWaiting || waitingForEndMatch) {
+					elements.push(c);
+				}
 
-checkIfSignificant = function ( page, offsets, src, body, out, cb, document ) {
+				// Clear out when an element node is encountered.
+				precedingNodes = [];
+			} else if ( c.nodeType === c.TEXT_NODE || c.nodeType === c.COMMENT_NODE ) {
+				if ( currentOffset && ( currentOffset < targetRange.end ) ) {
+					currentOffset += c.nodeValue.length;
+					if ( c.nodeType === c.COMMENT_NODE ) {
+						// Add the length of the '<!--' and '--> bits
+						currentOffset += 7;
+					}
+					if ( currentOffset >= targetRange.end ) {
+						waitingForEndMatch = false;
+					}
+				}
 
-	// Work around JSDOM's borken outerHTML pretty-printing / indenting.
-	// At least it does not indent innerHTML, so we get to fish out the
-	// parent element tag(s) and combine them with innerHTML.
-	//
-	// See jsdom/lib/jsdom/browser/index.js for the broken call to
-	// domToHtml.
-	function myOuterHTML ( node ) {
-		var jsOuterHTML = node.outerHTML || node.nodeValue,
-			startTagMatch = jsOuterHTML.match(/^ *(<[^>]+>)/),
-			endTagMatch = jsOuterHTML.match(/<[^>]+>$/);
-		if ( startTagMatch ) {
-			var tag = startTagMatch[1];
-			if ( startTagMatch[0].length === jsOuterHTML.length ) {
-				return tag;
-			} else {
-				if ( endTagMatch ) {
-					return tag + node.innerHTML + endTagMatch[0];
-				} else {
-					return tag + node.innerHTML;
+				if (wasWaiting || waitingForEndMatch) {
+					// Part of target range
+					elements.push(c);
+				} else if ( !currentOffset ) {
+					// Accumulate nodes without dsr
+					precedingNodes.push( c );
 				}
 			}
-		} else {
-			return jsOuterHTML;
+
+			if ( wasWaiting && !waitingForEndMatch ) {
+				break;
+			}
+
+			// Skip over encapsulated content
+			var typeOf = DU.isElt(c) ? c.getAttribute( 'typeof' ) || '' : '';
+			if (/\bmw:(?:Transclusion\b|Param\b|Extension\/[^\s]+)/.test(typeOf)) {
+				c = DU.skipOverEncapsulatedContent(c);
+			} else {
+				c = c.nextSibling;
+			}
+		}
+
+		var numElements = elements.length;
+		var numChildren = element.childNodes.length;
+		if (numElements === 0) {
+			return null;
+		} else if ( numElements < numChildren ) {
+			return { done: !waitingForEndMatch, nodes: elements } ;
+		} else { /* numElements === numChildren */
+			return { done: !waitingForEndMatch, nodes: [element] } ;
 		}
 	}
 
-	function normalizeWikitext(str) {
-		var orig = str;
-		// 1. Normalize multiple spaces to single space
+	return walkDOM(root);
+};
+
+var checkIfSignificant = function ( env, offsets, src, body, out, cb, document ) {
+
+
+	var normalizeWikitext = function ( str ) {
+
+		// Ignore leading tabs vs. leading spaces
+		str = str.replace(/^\t/, ' ');
+		str = str.replace(/\n\t/g, '\n ');
+		// Normalize multiple spaces to single space
 		str = str.replace(/ +/g, " ");
-		// 2. Eliminate spaces around wikitext chars
+		// Eliminate spaces around wikitext chars
 		// gwicke: disabled for now- too aggressive IMO
 		//str = str.replace(/([<"'!#\*:;+-=|{}\[\]\/]) /g, "$1");
-		// 3. Ignore capitalization of tags and void tag indications
-		str = str.replace(/<(\/?)([^ >\/]+)((?:[^>/]|\/(?!>))*)\/?>/g, function(match, close, name, remaining) {
+		// Ignore capitalization of tags and void tag indications
+		str = str.replace(/<(\/?)([^ >\/]+)((?:[^>\/]|\/(?!>))*)\/?>/g, function(match, close, name, remaining) {
 			return '<' + close + name.toLowerCase() + remaining.replace(/ $/, '') + '>';
 		} );
-		// 4. Ignore whitespace in table cell attributes
-		str = str.replace(/(^|\n|\|(?=\|)|!(?=!))({\||\|[-+]*|!) *([^|\n]*?) *(?=[|\n]|$)/g, '$1$2$3');
-		// 5. Ignore trailing semicolons and spaces in style attributes
+		// Ignore whitespace in table cell attributes
+		str = str.replace(/(^|\n|\|(?=\|)|!(?=!))(\{\||\|[\-+]*|!) *([^|\n]*?) *(?=[|\n]|$)/g, '$1$2$3');
+		// Ignore trailing semicolons and spaces in style attributes
 		str = str.replace(/style\s*=\s*"[^"]+"/g, function(match) {
 			return match.replace(/\s|;(?=")/g, '');
 		});
-		// 6. Strip double-quotes
+		// Strip double-quotes
 		str = str.replace(/"([^"]*?)"/g, "$1");
 
-		// 7. Ignore implicit </small> and </center> in table cells or the end
+		// Ignore implicit </small> and </center> in table cells or the end
 		// of the string for now
 		str = str.replace(/(^|\n)<\/(?:small|center)>(?=\n[|!]|\n?$)/g, '');
 		str = str.replace(/([|!].*?)<\/(?:small|center)>(?=\n[|!]|\n?$)/gi, '$1');
 
 		return str;
-	}
+	};
 
 	var i, k, diff, offset, origOut, newOut, origHTML, newHTML, origOrigHTML, origNewHTML, thisResult, results = [];
 	for ( i = 0; i < offsets.length; i++ ) {
@@ -285,6 +282,7 @@ checkIfSignificant = function ( page, offsets, src, body, out, cb, document ) {
 		offset = offsets[i];
 
 		thisResult.offset = offset;
+		// console.warn("--processing: " + JSON.stringify(offset));
 
 		if ( offset[0].start === offset[0].end &&
 				out.substr(offset[1].start, offset[1].end - offset[1].start)
@@ -295,26 +293,49 @@ checkIfSignificant = function ( page, offsets, src, body, out, cb, document ) {
 			// original (unclosed) DSR.
 			offset[0].start--;
 		}
-		origOut = findDsr( body, offset[0] || {}, src.length, true ) || [];
-		newOut = findDsr( document.firstChild.childNodes[1], offset[1] || {}, out.length, true ) || [];
-
+		// console.warn("--orig--");
+		var res = findMatchingNodes( body, offset[0] || {}, src.length);
+		origOut = res ? res.nodes : [];
 		for ( k = 0; k < origOut.length; k++ ) {
-			origOrigHTML += myOuterHTML(origOut[k]);
+			// node need not be an element always!
+			origOrigHTML += Util.serializeNode(origOut[k], true);
 		}
-
-		for ( k = 0; k < newOut.length; k++ ) {
-			origNewHTML += myOuterHTML(newOut[k]);
-		}
-
 		origHTML = Util.formatHTML( Util.normalizeOut( origOrigHTML ) );
+		// console.warn("# nodes: " + origOut.length);
+		// console.warn("html: " + origHTML);
+
+		// console.warn("--new--");
+		res = findMatchingNodes( document.body, offset[1] || {}, out.length);
+		newOut = res ? res.nodes : [];
+		for ( k = 0; k < newOut.length; k++ ) {
+			// node need not be an element always!
+			origNewHTML += Util.serializeNode(newOut[k], true);
+		}
 		newHTML = Util.formatHTML( Util.normalizeOut( origNewHTML ) );
+		// console.warn("# nodes: " + newOut.length);
+		// console.warn("html: " + newHTML);
 
 		// compute wt diffs
 		var wt1 = src.substring( offset[0].start, offset[0].end );
 		var wt2 = out.substring( offset[1].start, offset[1].end );
-		thisResult.wtDiff = Util.diff(wt1, wt2, false, true, true);
+		//thisResult.wtDiff = Util.contextDiff(wt1, wt2, false, true, true);
+
+		// Get diff substrings from offsets
+		/* jshint loopfunc: true */ // this function doesn't use loop variables
+		var formatDiff = function ( offset, context ) {
+			return [
+			'----',
+			src.substring(offset[0].start - context, offset[0].end + context),
+			'++++',
+			out.substring(offset[1].start - context, offset[1].end + context)
+			].join('\n');
+		}.bind( this, offset );
 
 		diff = Util.diff( origHTML, newHTML, false, true, true );
+
+
+		// No context by default
+		thisResult.wtDiff = formatDiff(0);
 
 		// Normalize wts to check if we really have a semantic diff
 		thisResult.type = 'skip';
@@ -326,95 +347,113 @@ checkIfSignificant = function ( page, offsets, src, body, out, cb, document ) {
 				//console.log( 'normDiff: =======\n' + normWT1 + '\n--------\n' + normWT2);
 				thisResult.htmlDiff = diff;
 				thisResult.type = 'fail';
+				// Provide context for semantic diffs
+				thisResult.wtDiff = formatDiff(25);
 			}
 		}
 		results.push( thisResult );
 	}
-	cb( null, page, results );
-},
+	cb( null, env, results );
+};
 
-doubleRoundtripDiff = function ( page, offsets, src, body, out, cb, wgScript ) {
-	var parser, env = Util.getParserEnv();
+var doubleRoundtripDiff = function ( env, offsets, body, out, cb ) {
+	var src = env.page.src;
 
 	if ( offsets.length > 0 ) {
-		env.text = src;
-		env.wgScript = wgScript;
+		env.setPageSrcInfo( out );
 		env.errCB = function ( error ) {
-			cb( error, page, [] );
+			cb( error, env, [] );
 			process.exit( 1 );
 		};
 
-
-		var parserPipeline = Util.getParser( env, 'text/x-mediawiki/full' );
-
-		parserPipeline.on( 'document', checkIfSignificant.bind( null, page, offsets, src, body, out, cb ) );
-
-		parserPipeline.process( out );
+		var parserPipeline = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
+		parserPipeline.on( 'document', checkIfSignificant.bind( null, env, offsets, src, body, out, cb ) );
+		parserPipeline.processToplevelDoc( out );
 
 	} else {
-		cb( null, page, [] );
+		cb( null, env, [] );
 	}
-},
+};
 
-roundTripDiff = function ( page, src, document, cb, env ) {
-	var out, curPair, patch, diff, offsetPairs;
+var roundTripDiff = function ( env, document, cb ) {
+	var out, diff, offsetPairs;
+
+	// Re-parse the HTML to uncover foster-parenting issues
+	var origBody = document.body;
+	document = domino.createDocument(document.outerHTML);
 
 	try {
-		out = new WikitextSerializer( { env: env } ).serializeDOM( document.body );
-
-		diff = jsDiff.diffLines( out, src );
+		out = new WikitextSerializer( { env: env } ).serializeDOM(document.body);
+		diff = jsDiff.diffLines( out, env.page.src );
 		offsetPairs = Util.convertDiffToOffsetPairs( diff );
 
 		if ( diff.length > 0 ) {
-			doubleRoundtripDiff( page, offsetPairs, src, document.body, out, cb, env.wgScript );
+			doubleRoundtripDiff( env, offsetPairs, origBody, out, cb );
 		} else {
-			cb( null, page, [] );
+			cb( null, env, [] );
 		}
 	} catch ( e ) {
-		cb( e, page, [] );
+		cb( e, env, [] );
 	}
-},
+};
 
-fetch = function ( page, cb, options ) {
+var fetch = function ( page, cb, options ) {
 	cb = typeof cb === 'function' ? cb : function () {};
 
-	var env = Util.getParserEnv();
-
-	env.wgScript = env.interwikiMap[options.wiki];
-	env.setPageName( page );
-
-	env.debug = options.debug;
-	env.trace = options.trace;
-
-    env.errCB = function ( error ) {
-        cb( error, null, [] );
-    };
-
-	var target = env.resolveTitle( env.normalizeTitle( env.pageName ), '' );
-	var tpr = new TemplateRequest( env, target, null );
-
-	tpr.once( 'src', function ( err, src ) {
-		if ( err ) {
-			cb( err, page, [] );
-		} else {
-			Util.parse( env, function ( src, err, out ) {
-				if ( err ) {
-					cb( err, page, [] );
-				} else {
-					roundTripDiff( page, src, out, cb, env );
-				}
-			}, err, src );
+	var envCb = function ( err, env ) {
+		env.errCB = function ( error ) {
+			cb( error, env, [] );
+		};
+		if ( err !== null ) {
+			env.errCB( err );
+			return;
 		}
-	} );
-},
 
-cbCombinator = function ( formatter, cb, err, page, text ) {
-	cb( err, formatter( page, err, text ) );
-},
+		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
+		var tpr = new TemplateRequest( env, target, null );
 
-consoleOut = function ( err, output ) {
+		tpr.once( 'src', function ( err, src_and_metadata ) {
+			if ( err ) {
+				cb( err, env, [] );
+			} else {
+				env.setPageSrcInfo( src_and_metadata );
+				Util.parse( env, function ( src, err, out ) {
+					if ( err ) {
+						cb( err, env, [] );
+					} else {
+						roundTripDiff( env, out, cb );
+					}
+				}, err, env.page.src );
+			}
+		} );
+	};
+
+	var prefix = options.prefix || 'en';
+
+	if ( options.apiURL ) {
+		prefix = 'customwiki';
+	}
+
+	var parsoidConfig = new ParsoidConfig( options, { defaultWiki: prefix } );
+
+	if ( options.apiURL ) {
+		parsoidConfig.setInterwiki( 'customwiki', options.apiURL );
+	}
+	parsoidConfig.editMode = Util.booleanOption( options.editMode );
+
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, prefix, page, envCb );
+};
+
+var cbCombinator = function ( formatter, cb, err, env, text ) {
+	cb( err, formatter( env, err, text ) );
+};
+
+var consoleOut = function ( err, output ) {
 	if ( err ) {
-		console.log( 'ERROR: ' + err.stack );
+		console.log( 'ERROR: ' + err);
+		if (err.stack) {
+			console.log( 'Stack trace: ' + err.stack);
+		}
 		process.exit( 1 );
 	} else {
 		console.log( output );
@@ -429,29 +468,61 @@ if ( typeof module === 'object' ) {
 }
 
 if ( !module.parent ) {
-	argv = optimist.argv;
-	title = argv._[0];
+	var opts = optimist.usage( 'Usage: $0 [options] <page-title> \n\n', {
+		'xml': {
+			description: 'Use xml callback',
+			'boolean': true,
+			'default': false
+		},
+		'prefix': {
+			description: 'Which wiki prefix to use; e.g. "en" for English wikipedia, "es" for Spanish, "mw" for mediawiki.org',
+			'boolean': false,
+			'default': ''
+		},
+		'apiURL': {
+			description: 'http path to remote API, e.g. http://en.wikipedia.org/w/api.php',
+			'boolean': false,
+			'default': null
+		},
+		'help': {
+			description: 'Show this message',
+			'boolean': true,
+			'default': false
+		},
+		'editMode': {
+			description: 'Test in edit-mode (changes some parse & serialization strategies)',
+			'default': false, // suppress noise by default
+			'boolean': true
+		},
+		'debug': {
+			description: 'Debug mode',
+			'boolean': true,
+			'default': false
+		},
+		'trace [optional-flags]': {
+			description: 'Trace tokens (see below for supported trace options)',
+			'boolean': true,
+			'default': false
+		},
+		'dump <flags>': {
+			description: 'Dump state (see below for supported dump flags)',
+			'boolean': false,
+			'default': ""
+		}
+	});
+
+	var callback;
+	var argv = opts.argv;
+	var title = argv._[0];
 
 	if ( title ) {
-		if ( argv.xml ) {
-			callback = xmlCallback;
-		} else {
-			callback = plainCallback;
-		}
-
-		callback = cbCombinator.bind( null, callback, consoleOut );
-
-		var options = {
-			wiki: argv.wiki || 'en',
-			debug: argv.debug,
-			trace: argv.trace
-		};
-		fetch( title, callback, options );
+		callback = cbCombinator.bind( null,
+		                              Util.booleanOption( argv.xml ) ?
+		                              xmlCallback : plainCallback, consoleOut );
+		fetch( title, callback, argv );
 	} else {
-		// FIXME: set up optimist spec so that the title does not need to come
-		// first
-		console.log( 'Usage: node roundtrip-test.js PAGETITLE [--xml] [--wiki CODE] [--debug] [--trace]' );
+		opts.showHelp();
+		console.error( 'Run "node parse --help" for supported trace and dump flags');
 	}
-}
 
-} )();
+}

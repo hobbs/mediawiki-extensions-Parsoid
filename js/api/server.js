@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * A very basic cluster-based server runner. Restarts failed workers, but does
  * not much else right now.
@@ -16,21 +17,22 @@ if (cluster.isMaster) {
     cluster.fork();
   }
 
-  cluster.on('death', function(worker) {
-    if(!worker.suicide) {
-      console.log('worker ' + worker.pid + ' died, restarting.');
-      // restart worker
+  cluster.on('exit', function(worker, code, signal) {
+    if (!worker.suicide) {
+      var exitCode = worker.process.exitCode;
+      console.log('worker', worker.process.pid,
+                  'died ('+exitCode+'), restarting.');
       cluster.fork();
     }
   });
+
   process.on('SIGTERM', function() {
     console.log('master shutting down, killing workers');
-    for(var i = 0; i < workers.length; i++) {
-      console.log('Killing worker ' + i + ' with PID ' + workers[i].pid);
-      // disconnect() doesn't work for some reason
-      //workers[i].disconnect();
-      workers[i].kill('SIGTERM');
-    }
+    var workers = cluster.workers;
+    Object.keys(workers).forEach(function(id) {
+        console.log('Killing worker ' + id);
+        workers[id].destroy();
+    });
     console.log('Done killing workers, bye');
     process.exit(1);
   } );
@@ -39,5 +41,7 @@ if (cluster.isMaster) {
     console.log('Worker shutting down');
     process.exit(1);
   });
-  app.listen(8000);
+  // when running on appfog.com the listen port for the app
+  // is passed in an environment variable.  Most users can ignore this!
+  app.listen(process.env.VCAP_APP_PORT || 8000);
 }

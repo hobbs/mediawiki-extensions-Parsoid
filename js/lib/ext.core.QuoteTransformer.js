@@ -1,11 +1,15 @@
 "use strict";
 /*
  * MediaWiki-compatible italic/bold handling as a token stream transformation.
- *
- * @author Gabriel Wicke <gwicke@wikimedia.org>
  */
 
-var Util = require('./mediawiki.Util.js').Util;
+var Util = require('./mediawiki.Util.js').Util,
+    defines = require('./mediawiki.parser.defines.js');
+// define some constructor shortcuts
+var NlTk = defines.NlTk,
+    TagTk = defines.TagTk,
+    SelfclosingTagTk = defines.SelfclosingTagTk,
+    EndTagTk = defines.EndTagTk;
 
 function QuoteTransformer ( dispatcher ) {
 	this.reset();
@@ -54,7 +58,6 @@ QuoteTransformer.prototype._startNewChunk = function ( ) {
 // onNewLine.
 QuoteTransformer.prototype.onQuote = function ( token, frame, prevToken ) {
 	var qlen = token.value.length,
-		tokens = [], // output tokens
 		ctx = {
 			token: token,
 			frame: frame,
@@ -63,11 +66,18 @@ QuoteTransformer.prototype.onQuote = function ( token, frame, prevToken ) {
 		ctx2 = {
 			frame: frame,
 			prevToken: prevToken
-		};
+		},
+		tsr;
 
 	if ( ! this.isActive ) {
 		this.dispatcher.addTransform( this.onNewLine.bind(this), "QuoteTransformer:onNewLine",
 				this.quoteAndNewlineRank, 'newline' );
+		// Treat 'th' just the same as a newline
+		this.dispatcher.addTransform( this.onNewLine.bind(this), "QuoteTransformer:onNewLine",
+				this.quoteAndNewlineRank, 'tag', 'td' );
+		// Treat 'td' just the same as a newline
+		this.dispatcher.addTransform( this.onNewLine.bind(this), "QuoteTransformer:onNewLine",
+				this.quoteAndNewlineRank, 'tag', 'th' );
 		// Treat end-of-input just the same as a newline
 		this.dispatcher.addTransform( this.onNewLine.bind(this), "QuoteTransformer:onNewLine:end",
 				this.quoteAndNewlineRank, 'end' );
@@ -99,21 +109,50 @@ QuoteTransformer.prototype.onQuote = function ( token, frame, prevToken ) {
 			// by the HTML 5 tree builder. This does not always result in the
 			// prettiest result, but at least it is always correct and very
 			// convenient.
+
+			tsr = ctx.token.dataAttribs ? ctx.token.dataAttribs.tsr : null;
+			if ( tsr ) {
+				ctx.token = ctx.token.clone();
+				ctx.token.dataAttribs.tsr = [tsr[0], tsr[0] + 2];
+			}
 			this.currentChunk.push(ctx);
 			this.italics.push(this.currentChunk);
+
+			// Now for the bold..
 			this._startNewChunk();
-			ctx2.token = { attribs: token.attribs };
+			ctx2.token = {
+				attribs: ctx.token.attribs
+			};
+			if ( tsr ) {
+				// Get the correct tsr range for the bold
+				ctx2.token.dataAttribs = { tsr: [tsr[1] - 3, tsr[1]] };
+			}
 			this.currentChunk.push(ctx2);
 			this.bolds.push(this.currentChunk);
 			break;
 		default: // longer than 5, only use the last 5 ticks
 			var newvalue = token.value.substr(0, qlen - 5 );
+			tsr = ctx.token.dataAttribs ? ctx.token.dataAttribs.tsr : null;
+			// update tsr for italic token
+			if ( tsr ) {
+				ctx.token = ctx.token.clone();
+				ctx.token.dataAttribs.tsr = [tsr[0] + qlen - 5, tsr[1] - 3];
+			}
+
 			this.currentChunk.push ( newvalue );
 			this._startNewChunk();
 			this.currentChunk.push(ctx);
 			this.italics.push(this.currentChunk);
+
+			// Now for the bold..
 			this._startNewChunk();
-			ctx2.token = { attribs: ctx.token.attribs };
+			ctx2.token = {
+				attribs: ctx.token.attribs
+			};
+			if ( tsr ) {
+				// Get the correct tsr range for the bold
+				ctx2.token.dataAttribs = { tsr: [tsr[1] - 3, tsr[1]] };
+			}
 			this.currentChunk.push(ctx2);
 			this.bolds.push(this.currentChunk);
 			break;
@@ -147,8 +186,7 @@ QuoteTransformer.prototype.onNewLine = function (  token, frame, prevToken ) {
 	if (this.italics.length % 2 && this.bolds.length % 2) {
 		var firstsingleletterword = -1,
 			firstmultiletterword = -1,
-			firstspace = -1,
-			lastbold = -1;
+			firstspace = -1;
 		for (var j = 0; j < this.bolds.length; j++) {
 			var ctx = this.bolds[j][0];
 			var ctxPrevToken = ctx.prevToken;
@@ -169,7 +207,8 @@ QuoteTransformer.prototype.onNewLine = function (  token, frame, prevToken ) {
 						}
 					}
 				} else if ( ( ctxPrevToken.constructor === NlTk ||
-								ctxPrevToken.constructor === TagTk ) &&
+								ctxPrevToken.constructor === TagTk ||
+								ctxPrevToken.constructor === SelfclosingTagTk ) &&
 								firstmultiletterword === -1 ) {
 					// This is an approximation, as the original doQuotes
 					// operates on the source and just looks at space vs.
@@ -215,8 +254,10 @@ QuoteTransformer.prototype.onNewLine = function (  token, frame, prevToken ) {
 	// prepare for next line
 	this.reset();
 
-	// remove 'end', 'newline' and 'any' registrations
+	// remove registrations
 	this.dispatcher.removeTransform( this.quoteAndNewlineRank, 'end' );
+	this.dispatcher.removeTransform( this.quoteAndNewlineRank, 'tag', 'td' );
+	this.dispatcher.removeTransform( this.quoteAndNewlineRank, 'tag', 'th' );
 	this.dispatcher.removeTransform( this.quoteAndNewlineRank, 'newline' );
 	this.dispatcher.removeTransform( this.anyRank, 'any' );
 	//console.warn( 'res:' + JSON.stringify( res, null, 2 ));
@@ -248,7 +289,11 @@ QuoteTransformer.prototype.quotesToTags = function ( chunks, name ) {
 	var toggle = true,
 		t,
 		j,
-		out = [];
+		newToken,
+		nameToWidth = {
+			b: 3,
+			i: 2
+		};
 
 	for (j = 0; j < chunks.length; j++) {
 		//console.warn( 'quotesToTags ' + name + ': ' + JSON.stringify( chunks, null, 2 ) );
@@ -256,22 +301,28 @@ QuoteTransformer.prototype.quotesToTags = function ( chunks, name ) {
 		//console.warn( 'quotesToTags t: ' + JSON.stringify( t, null, 2));
 
 		if(toggle) {
-			chunks[j][0] = new TagTk( name, t.attribs,
+			newToken = new TagTk( name, t.attribs,
 					// Mark last element as auto-closed
 					j === chunks.length - 1 ? { autoInsertedEnd: 1 } : {} );
 		} else {
-			chunks[j][0] = new EndTagTk( name, t.attribs, {} );
+			newToken = new EndTagTk( name, t.attribs, {} );
 		}
 		if (t.dataAttribs && t.dataAttribs.tsr) {
-			var tsr = t.dataAttribs.tsr;
-			var len = tsr[1] - tsr[0];
+			var tsr = t.dataAttribs.tsr,
+				len = tsr[1] - tsr[0];
 			// Verify if we the tsr value is accurate
 			// SSS FIXME: We could potentially adjust tsr based on length
 			// but dont know yet whether to fix tsr[0] or tsr[1]
-			if ((len === 3 && name === 'b') || (len === 2 && name === 'i')) {
-				chunks[j][0].dataAttribs.tsr = Util.clone(tsr);
+			if (len === nameToWidth[name]) {
+				newToken.dataAttribs.tsr = Util.clone(tsr);
+			} else {
+				// we generally use the last quotes, so adjust the tsr to that
+				newToken.dataAttribs.tsr = [tsr[1] - nameToWidth[name], tsr[1]];
 			}
 		}
+
+		chunks[j][0] = newToken;
+
 		toggle = !toggle;
 	}
 	if (!toggle) {

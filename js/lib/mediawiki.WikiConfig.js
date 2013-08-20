@@ -459,6 +459,7 @@ WikiConfig.prototype = {
 				return null;
 			}.bind( this );
 
+
 		mwlist = [];
 		for ( ix = 0; ix < optionsList.length; ix++ ) {
 			if ( ix > 0 ) {

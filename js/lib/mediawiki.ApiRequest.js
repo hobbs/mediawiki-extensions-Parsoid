@@ -607,7 +607,9 @@ var ConfigRequest = function ( apiURI, env ) {
 			'general',
 			'interwikimap',
 			'languages',
-			'protocols'
+			// Wikia backwards compatibility fix #back-compat
+			// Prevents this warning: "Unrecognized value for parameter 'siprop': protocols"
+			//'protocols'
 		],
 
 		apiargs = {

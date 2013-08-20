@@ -5,6 +5,7 @@
 .DS_Store
 .deploy
 
+sftp-config.json
 
 cpp/build
 cpp/contrib/

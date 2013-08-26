@@ -21,7 +21,8 @@ var KV = defines.KV,
     TagTk = defines.TagTk,
     SelfclosingTagTk = defines.SelfclosingTagTk,
     EndTagTk = defines.EndTagTk,
-	ImageInfoRequest = require( './mediawiki.ApiRequest.js' ).ImageInfoRequest;
+	ImageInfoRequest = require( './mediawiki.ApiRequest.js' ).ImageInfoRequest,
+	PhotoAttributionRequest = require( './mediawiki.ApiRequest.js' ).PhotoAttributionRequest;
 
 function WikiLinkHandler( manager, options ) {
 	this.manager = manager;
@@ -1023,9 +1024,17 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 			] );
 		}
 
-		tokens.push( containerClose );
+		var attributionRequest = new PhotoAttributionRequest( env, filename );
+		attributionRequest.on( 'src', function( error, data ) {
 
-		cb( { tokens: tokens } );
+			container.addAttribute( 'data-attribution-username', data.username );
+			container.addAttribute( 'data-attribution-url', data.url );
+
+			tokens.push( containerClose );
+
+			cb( { tokens: tokens } );
+
+		} );
 	}
 
 	// First check if we have a cached copy of this image expansion, and

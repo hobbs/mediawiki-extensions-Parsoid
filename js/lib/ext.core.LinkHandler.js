@@ -1027,9 +1027,16 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 		var attributionRequest = new PhotoAttributionRequest( env, filename );
 		attributionRequest.on( 'src', function( error, data ) {
 
-			container.addAttribute( 'data-attribution-username', data.username );
-			container.addAttribute( 'data-attribution-url', data.url );
-
+			var jsonObj = {};
+			if ( container.getAttribute( 'data-mw' ) ) {
+				jsonObj = JSON.parse( container.getAttribute( 'data-mw' ) );
+			}
+			jsonObj.attribution = {
+				'username': data.username,
+				'avatar': data.avatar
+			};
+			container.addAttribute( 'data-mw', JSON.stringify( jsonObj ) );
+			
 			tokens.push( containerClose );
 
 			cb( { tokens: tokens } );

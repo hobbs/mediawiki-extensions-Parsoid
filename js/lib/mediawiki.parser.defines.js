@@ -1,35 +1,51 @@
 "use strict";
 
 /**
- * Constructors for different token types. Plain text is represented as simple
- * strings or String objects (if attributes are needed).
+ * @class ParserDefinesModule
+ * @singleton
  */
 
 var async = require('async'),
-	Util = require('./mediawiki.Util.js').Util,
-	$ = require( 'jquery' );
+	$ = require( './fakejquery' );
 
 // To support isHTMLTag querying
 String.prototype.isHTMLTag = function() {
 	return false;
 };
 
-/* -------------------- KV -------------------- */
-// A key-value pair
-function KV ( k, v ) {
+/**
+ * @class
+ *
+ * Key-value pair.
+ *
+ * @constructor
+ * @param {Mixed} k
+ * @param {Mixed} v
+ * @param {Array} srcOffsets The source offsets.
+ */
+function KV ( k, v, srcOffsets ) {
 	this.k = k;
 	this.v = v;
-}
-
-/* -------------------- TagTk -------------------- */
-function TagTk( name, attribs, dataAttribs ) {
-	this.name = name;
-	this.attribs = attribs || [];
-	this.dataAttribs = dataAttribs || {};
+	if (srcOffsets) {
+		this.srcOffsets = srcOffsets;
+	}
 }
 
 /**
- * Private helper for genericTokenMethods
+ * @class Token
+ * @abstract
+ *
+ * Catch-all class for all token types.
+ */
+
+/**
+ * @member Token
+ *
+ * Private helper for genericTokenMethods - store the orginal value of an attribute in a token's dataAttribs.
+ *
+ * @param {string} name
+ * @param {Mixed} value
+ * @param {Mixed} origValue
  */
 var setShadowInfo = function ( name, value, origValue ) {
 	// Don't shadow if value is the same or the orig is null
@@ -47,22 +63,35 @@ var setShadowInfo = function ( name, value, origValue ) {
 	}
 };
 
-/**
+/*
  * Generic token attribute accessors
+ *
+ * TODO make this a real base class instead of some weird hackish object.
  */
 var genericTokenMethods = {
 	setShadowInfo: setShadowInfo,
 
 	/**
-	 * Generic set attribute method. Expects the context to be set to a token.
+	 * @member Token
+	 *
+	 * Generic set attribute method.
+	 *
+	 * @param {string} name
+	 * @param {Mixed} value
 	 */
 	addAttribute: function ( name, value ) {
 		this.attribs.push( new KV( name, value ) );
 	},
 
 	/**
-	 * Generic set attribute method with support for change detection. Expects the
-	 * context to be set to a token.
+	 * @member Token
+	 *
+	 * Generic set attribute method with support for change detection.
+	 * Set a value and preserve the original wikitext that produced it.
+	 *
+	 * @param {string} name
+	 * @param {Mixed} value
+	 * @param {Mixed} origValue
 	 */
 	addNormalizedAttribute: function ( name, value, origValue ) {
 		this.addAttribute( name, value );
@@ -70,21 +99,36 @@ var genericTokenMethods = {
 	},
 
 	/**
-	 * Generic attribute accessor. Expects the context to be set to a token.
+	 * @member Token
+	 *
+	 * Generic attribute accessor.
+	 *
+	 * @param {string} name
+	 * @return {Mixed}
 	 */
 	getAttribute: function ( name ) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		return Util.lookup( this.attribs, name );
 	},
 
 	/**
+	 * @member Token
+	 *
 	 * Set an unshadowed attribute.
+	 *
+	 * @param {string} name
+	 * @param {Mixed} value
 	 */
 	setAttribute: function ( name, value ) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		// First look for the attribute and change the last match if found.
 		for ( var i = this.attribs.length-1; i >= 0; i-- ) {
-			var k = this.attribs[i].k;
+			var kv = this.attribs[i],
+				k = kv.k;
 			if ( k.constructor === String && k.toLowerCase() === name ) {
-				this.attribs[i] = new KV( k, value );
+				var newKV = Util.clone(kv);
+				newKV.v = value;
+				this.attribs[i] = newKV;
 				return;
 			}
 		}
@@ -93,16 +137,47 @@ var genericTokenMethods = {
 	},
 
 	/**
+	 * @member Token
+	 *
 	 * Attribute info accessor for the wikitext serializer. Performs change
 	 * detection and uses unnormalized attribute values if set. Expects the
 	 * context to be set to a token.
+	 *
+	 * @param {string} name
+	 * @param {Array} tplAttrs The list of expanded attributes.
+	 * @returns {Object} Information about the shadow info attached to this attribute.
+	 * @returns {Mixed} return.value
+	 * @returns {boolean} return.modified Whether the attribute was changed between parsing and now.
+	 * @returns {boolean} return.fromsrc Whether we needed to get the source of the attribute to round-trip it.
 	 */
-	getAttributeShadowInfo: function ( name ) {
+	getAttributeShadowInfo: function ( name, tplAttrs ) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		var curVal = Util.lookup( this.attribs, name );
+
+		// If tplAttrs is truish, check if this attribute was
+		// template-generated. Return that value if set.
+		if ( tplAttrs ) {
+			var type = Util.lookup(this.attribs, 'typeof'),
+				about = Util.lookup(this.attribs, 'about'),
+				tplAttrState = tplAttrs[about];
+			if (type && type.match(/\bmw:ExpandedAttrs\/[^\s]+/) &&
+					tplAttrState &&
+					tplAttrState.vs[name] )
+			{
+				return {
+					value: tplAttrState.vs[name],
+					modified: false,
+					fromsrc: true
+				};
+			}
+		}
+
+		// Not the case, continue regular round-trip information.
 		if ( this.dataAttribs.a === undefined ) {
 			return {
 				value: curVal,
-				modified: false,
+				// Mark as modified if a new element
+				modified: Object.keys(this.dataAttribs).length === 0,
 				fromsrc: false
 			};
 		} else if ( this.dataAttribs.a[name] !== curVal ||
@@ -122,7 +197,11 @@ var genericTokenMethods = {
 	},
 
 	/**
+	 * @member Token
+	 *
 	 * Completely remove all attributes with this name.
+	 *
+	 * @param {string} name
 	 */
 	removeAttribute: function ( name ) {
 		var out = [],
@@ -137,12 +216,17 @@ var genericTokenMethods = {
 	},
 
 	/**
+	 * @member Token
+	 *
 	 * Set an attribute to a value, and shadow it if it was already set
+	 *
+	 * @param {string} name
+	 * @param {Mixed} value
 	 */
 	setShadowedAttribute: function ( name, value ) {
 		var out = [],
 			found = false;
-		for ( var i = this.attribs.length; i >= 0; i-- ) {
+		for ( var i = this.attribs.length - 1; i >= 0; i-- ) {
 			var kv = this.attribs[i];
 			if ( kv.k.toLowerCase() !== name ) {
 				out.push( kv );
@@ -166,9 +250,15 @@ var genericTokenMethods = {
 	},
 
 	/**
+	 * @member Token
+	 *
 	 * Add a space-separated property value
+	 *
+	 * @param {string} name
+	 * @param {Mixed} value The value to add to the attribute.
 	 */
 	addSpaceSeparatedAttribute: function ( name, value ) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		var curVal = Util.lookupKV( this.attribs, name ),
 			vals;
 		if ( curVal !== null ) {
@@ -188,11 +278,27 @@ var genericTokenMethods = {
 		}
 	},
 
-	isHTMLTag: function() {
+	/**
+	 * @member Token
+	 *
+	 * Determine whether the current token was an HTML tag in wikitext.
+	 *
+	 * @returns {boolean}
+	 */
+	isHTMLTag: function () {
 		return this.dataAttribs.stx === 'html';
 	},
 
-	clone: function(cloneAttribs) {
+	/**
+	 * @member Token
+	 *
+	 * Clone a token.
+	 *
+	 * @param {boolean} cloneAttribs Whether to clone attributes too.
+	 * @returns {Token}
+	 */
+	clone: function ( cloneAttribs ) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		if (cloneAttribs === undefined) {
 			cloneAttribs = true;
 		}
@@ -208,20 +314,53 @@ var genericTokenMethods = {
 		return myClone;
 	},
 
+	/**
+	 * @member Token
+	 *
+	 * Get the wikitext source of a token.
+	 *
+	 * @param {MWParserEnvironment} env
+	 * @returns {string}
+	 */
 	getWTSource: function(env) {
 		var tsr = this.dataAttribs.tsr;
-		return tsr ? env.text.substring(tsr[0], tsr[1]) : null;
+		return tsr ? env.page.src.substring(tsr[0], tsr[1]) : null;
 	}
 };
+
+/**
+ * @class
+ * @extends Token
+ *
+ * HTML tag token.
+ *
+ * @constructor
+ * @param {string} name
+ * @param {KV[]} attribs
+ * @param {Object} dataAttribs Data-parsoid object.
+ */
+function TagTk( name, attribs, dataAttribs ) {
+	this.name = name;
+	this.attribs = attribs || [];
+	this.dataAttribs = dataAttribs || {};
+}
 
 TagTk.prototype = {};
 
 TagTk.prototype.constructor = TagTk;
 
+/**
+ * @method
+ * @returns {string}
+ */
 TagTk.prototype.toJSON = function () {
 	return $.extend( { type: 'TagTk' }, this );
 };
 
+/**
+ * @method
+ * @returns {string}
+ */
 TagTk.prototype.defaultToString = function(t) {
 	return "<" + this.name + ">";
 };
@@ -248,7 +387,13 @@ Object.defineProperty( TagTk.prototype, 'tagToStringFns',
 			value: tagToStringFns
 		} );
 
+/**
+ * @method
+ * @param {boolean} compact Whether to return the full HTML, or just the tag name.
+ * @returns {string}
+ */
 TagTk.prototype.toString = function(compact) {
+	var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 	if (this.isHTMLTag()) {
 		if (compact) {
 			return "<HTML:" + this.name + ">";
@@ -269,7 +414,17 @@ TagTk.prototype.toString = function(compact) {
 // add in generic token methods
 $.extend( TagTk.prototype, genericTokenMethods );
 
-/* -------------------- EndTagTk -------------------- */
+/**
+ * @class
+ * @extends Token
+ *
+ * HTML end tag token.
+ *
+ * @constructor
+ * @param {string} name
+ * @param {KV[]} attribs
+ * @param {Object} dataAttribs
+ */
 function EndTagTk( name, attribs, dataAttribs ) {
 	this.name = name;
 	this.attribs = attribs || [];
@@ -280,10 +435,18 @@ EndTagTk.prototype = {};
 
 EndTagTk.prototype.constructor = EndTagTk;
 
+/**
+ * @method
+ * @returns {string}
+ */
 EndTagTk.prototype.toJSON = function () {
 	return $.extend( { type: 'EndTagTk' }, this );
 };
 
+/**
+ * @method
+ * @returns {string}
+ */
 EndTagTk.prototype.toString = function() {
 	if (this.isHTMLTag()) {
 		return "</HTML:" + this.name + ">";
@@ -291,10 +454,21 @@ EndTagTk.prototype.toString = function() {
 		return "</" + this.name + ">";
 	}
 };
+
 // add in generic token methods
 $.extend( EndTagTk.prototype, genericTokenMethods );
 
-/* -------------------- SelfclosingTagTk -------------------- */
+/**
+ * @class
+ *
+ * HTML tag token for a self-closing tag (like a br or hr).
+ *
+ * @extends Token
+ * @constructor
+ * @param {string} name
+ * @param {KV[]} attribs
+ * @param {Object} dataAttribs
+ */
 function SelfclosingTagTk( name, attribs, dataAttribs ) {
 	this.name = name;
 	this.attribs = attribs || [];
@@ -305,11 +479,26 @@ SelfclosingTagTk.prototype = {};
 
 SelfclosingTagTk.prototype.constructor = SelfclosingTagTk;
 
+/**
+ * @method
+ * @returns {string}
+ */
 SelfclosingTagTk.prototype.toJSON = function () {
 	return $.extend( { type: 'SelfclosingTagTk' }, this );
 };
 
+/**
+ * @method multiTokenArgToString
+ * @param {string} key
+ * @param {Object} arg
+ * @param {string} indent The string by which we should indent each new line.
+ * @param {string} indentIncrement The string we should add to each level of indentation.
+ * @returns {Object}
+ * @returns {boolean} return.present Whether there is any non-empty string representation of these tokens.
+ * @returns {string} return.str
+ */
 SelfclosingTagTk.prototype.multiTokenArgToString = function(key, arg, indent, indentIncrement) {
+	var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 	var newIndent = indent + indentIncrement;
 	var present = true;
 	var toks    = Util.toStringTokens(arg, newIndent);
@@ -322,8 +511,18 @@ SelfclosingTagTk.prototype.multiTokenArgToString = function(key, arg, indent, in
 	}
 
 	return {present: present, str: str};
-},
+};
 
+/**
+ * @method attrsToSTring
+ *
+ * Get a string representation of the tag's attributes.
+ *
+ * @param {string} indent The string by which to indent every line.
+ * @param {string} indentIncrement The string to add to every successive level of indentation.
+ * @param {number} startAttrIndex Where to start converting attributes.
+ * @returns {string}
+ */
 SelfclosingTagTk.prototype.attrsToString = function(indent, indentIncrement, startAttrIndex) {
 	var buf = [];
 	for (var i = startAttrIndex, n = this.attribs.length; i < n; i++) {
@@ -346,7 +545,15 @@ SelfclosingTagTk.prototype.attrsToString = function(indent, indentIncrement, sta
 	return buf.join("\n" + indent + "|");
 };
 
+
+/**
+ * @method
+ * @param {boolean} compact Whether to return the full HTML, or just the tag name.
+ * @param {string} indent The string by which to indent each line.
+ * @returns {string}
+ */
 SelfclosingTagTk.prototype.defaultToString = function(compact, indent) {
+	var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 	if (compact) {
 		var buf = "<" + this.name + ">:";
 		var attr0 = this.attribs[0];
@@ -364,6 +571,7 @@ SelfclosingTagTk.prototype.defaultToString = function(compact, indent) {
 
 tagToStringFns = {
 	"extlink": function(compact, indent) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		var indentIncrement = "  ";
 		var href = Util.toStringTokens(Util.lookup(this.attribs, 'href'), indent + indentIncrement);
 		if (compact) {
@@ -384,6 +592,7 @@ tagToStringFns = {
 	},
 
 	"wikilink": function(compact, indent) {
+		var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 		if (!indent) {
 			indent = "";
 		}
@@ -415,6 +624,12 @@ Object.defineProperty( SelfclosingTagTk.prototype, 'tagToStringFns',
 			value: tagToStringFns
 		} );
 
+/**
+ * @method
+ * @param {boolean} compact Whether to return the full HTML, or just the tag name.
+ * @param {string} indent The string by which to indent each line.
+ * @returns {string}
+ */
 SelfclosingTagTk.prototype.toString = function(compact, indent) {
 	if (this.isHTMLTag()) {
 		return "<HTML:" + this.name + " />";
@@ -423,29 +638,69 @@ SelfclosingTagTk.prototype.toString = function(compact, indent) {
 		return f ? f.bind(this)(compact, indent) : this.defaultToString(compact, indent);
 	}
 };
+
 // add in generic token methods
 $.extend( SelfclosingTagTk.prototype, genericTokenMethods );
 
-/* -------------------- NlTk -------------------- */
-function NlTk( ) { }
+/**
+ * @class
+ *
+ * Newline token.
+ *
+ * @extends Token
+ * @constructor
+ * @param {Array} The TSR of the newline(s).
+ */
+function NlTk( tsr ) {
+	if (tsr) {
+		this.dataAttribs = { tsr: tsr };
+	}
+}
 
 NlTk.prototype = {
 	constructor: NlTk,
 
+	/**
+	 * @method
+	 *
+	 * Convert the token to JSON.
+	 *
+	 * @returns {string} JSON string.
+	 */
 	toJSON: function () {
 		return $.extend( { type: 'NlTk' }, this );
 	},
 
+	/**
+	 * @method
+	 *
+	 * Convert the token to a simple string.
+	 *
+	 * @returns {"\\n"}
+	 */
 	toString: function() {
 		return "\\n";
 	},
 
+	/**
+	 * @method
+	 *
+	 * Tell the caller that this isn't an HTML tag.
+	 *
+	 * @returns {boolean} Always false
+	 */
 	isHTMLTag: function() {
 		return false;
 	}
 };
 
-/* -------------------- CommentTk -------------------- */
+/**
+ * @class
+ * @extends Token
+ * @constructor
+ * @param {string} value
+ * @param {Object} dataAttribs data-parsoid object.
+ */
 function CommentTk( value, dataAttribs ) {
 	this.value = value;
 	// won't survive in the DOM, but still useful for token serialization
@@ -489,8 +744,6 @@ EOFTk.prototype = {
 };
 
 
-
-
 /* -------------------- Params -------------------- */
 /**
  * A parameter object wrapper, essentially an array of key/value pairs with a
@@ -501,11 +754,12 @@ EOFTk.prototype = {
  * custom methods. Alternatively, the object could be made more abstract with
  * a separate .array method that just returns the plain array.
  */
-function Params ( env, params ) {
-	this.env = env;
+function Params ( params ) {
 	for (var i = 0; i < params.length; i++) {
 		this.push( params[i] );
 	}
+	this.argDict = null;
+	this.namedArgsDict = null;
 }
 
 Params.prototype = [];
@@ -517,46 +771,57 @@ Params.prototype.toString = function () {
 };
 
 Params.prototype.dict = function () {
-	var res = {};
-	for ( var i = 0, l = this.length; i < l; i++ ) {
-		var kv = this[i],
-			key = Util.tokensToString( kv.k ).trim();
-		res[key] = kv.v;
+	var Util = require('./mediawiki.Util.js').Util; // (circular dep)
+	if (this.argDict === null) {
+		var res = {};
+		for ( var i = 0, l = this.length; i < l; i++ ) {
+			var kv = this[i],
+				key = Util.tokensToString( kv.k ).trim();
+			res[key] = kv.v;
+		}
+		this.argDict = res;
 	}
-	return res;
+
+	return this.argDict;
 };
 
 Params.prototype.named = function () {
-	var n = 1,
-		out = {},
-		namedArgs = {};
+	var Util = require('./mediawiki.Util.js').Util; // (circular dep)
+	if (this.namedArgsDict === null) {
+		var n = 1,
+			out = {},
+			namedArgs = {};
 
-	for ( var i = 0, l = this.length; i < l; i++ ) {
-		// FIXME: Also check for whitespace-only named args!
-		var k = this[i].k;
-		var v = this[i].v;
-		if ( k.constructor === String ) {
-			k = k.trim();
+		for ( var i = 0, l = this.length; i < l; i++ ) {
+			// FIXME: Also check for whitespace-only named args!
+			var k = this[i].k;
+			var v = this[i].v;
+			if ( k.constructor === String ) {
+				k = k.trim();
+			}
+			if ( ! k.length ) {
+				out[n.toString()] = v;
+				n++;
+			} else if ( k.constructor === String ) {
+				namedArgs[k] = true;
+				out[k] = v;
+			} else {
+				k = Util.tokensToString( k ).trim();
+				namedArgs[k] = true;
+				out[k] = v;
+			}
 		}
-		if ( ! k.length ) {
-			out[n.toString()] = v;
-			n++;
-		} else if ( k.constructor === String ) {
-			namedArgs[k] = true;
-			out[k] = v;
-		} else {
-			k = Util.tokensToString( k ).trim();
-			namedArgs[k] = true;
-			out[k] = v;
-		}
+		this.namedArgsDict = { namedArgs: namedArgs, dict: out };
 	}
-	return { namedArgs: namedArgs, dict: out };
+
+	return this.namedArgsDict;
 };
 
 /**
  * Expand a slice of the parameters using the supplied get options.
  */
 Params.prototype.getSlice = function ( options, start, end ) {
+	var Util = require('./mediawiki.Util.js').Util; // (circular dep)
 	var args = this.slice( start, end ),
 		cb = options.cb;
 	//console.warn( JSON.stringify( args ) );
@@ -569,7 +834,7 @@ Params.prototype.getSlice = function ( options, start, end ) {
 				} else if ( kv.v.constructor === Array &&
 					// remove String from Array
 					kv.v.length === 1 && kv.v[0].constructor === String ) {
-						cb2( null, new KV( kv.k, kv.v[0] ) );
+						cb2( null, new KV( kv.k, kv.v[0], kv.srcOffsets ) );
 				} else {
 					// Expand the value
 					var o2 = $.extend( {}, options );
@@ -577,7 +842,7 @@ Params.prototype.getSlice = function ( options, start, end ) {
 					// and kv.v.get can generate a stream of async calls, we have
 					// to accumulate the results of the async calls and call cb2 in the end.
 					o2.cb = Util.buildAsyncOutputBufferCB(function (toks) {
-						cb2(null, new KV(kv.k, Util.tokensToString(toks)));
+						cb2(null, new KV(kv.k, Util.tokensToString(toks), kv.srcOffsets));
 					});
 					kv.v.get( o2 );
 				}
@@ -658,21 +923,21 @@ ParserValue.prototype.get = function( options, cb ) {
 				JSON.stringify( this, null, 2 );
 		}
 		options.cb = cb;
-		options.wrapTemplates = this.wrapTemplates;
+		options.wrapTemplates = options.wrapTemplates || this.wrapTemplates;
 		this.frame.expand( source, options );
 	}
 };
 
-// TODO: don't use globals!
 if (typeof module === "object") {
-	module.exports = {};
-	global.TagTk = TagTk;
-	global.EndTagTk = EndTagTk;
-	global.SelfclosingTagTk = SelfclosingTagTk;
-	global.NlTk = NlTk;
-	global.CommentTk = CommentTk;
-	global.EOFTk = EOFTk;
-	global.KV = KV;
-	global.Params = Params;
-	global.ParserValue = ParserValue;
+	module.exports = {
+		TagTk: TagTk,
+		EndTagTk: EndTagTk,
+		SelfclosingTagTk: SelfclosingTagTk,
+		NlTk: NlTk,
+		CommentTk: CommentTk,
+		EOFTk: EOFTk,
+		KV: KV,
+		Params: Params,
+		ParserValue: ParserValue
+	};
 }

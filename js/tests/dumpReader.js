@@ -15,7 +15,6 @@ util.inherits(DumpReader, events.EventEmitter);
 DumpReader.prototype.makeParser = function() {
 
 	var self = this,
-		complete = false,
 		stack = [{}],
 		workspace = {},
 		buffer = '';
@@ -35,6 +34,7 @@ DumpReader.prototype.makeParser = function() {
 	parser.on('startElementNS', function(elem, attrs, prefix, uri, namespaces) {
 		//console.warn( 'elem: ' + elem );
 		if (elem in ignoreNodes) {
+			/* jshint noempty: false */ // we know this is empty!
 			// ...
 		} else if (elem === 'page') {
 			//console.warn( 'starting page' );

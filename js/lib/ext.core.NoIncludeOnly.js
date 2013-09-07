@@ -2,49 +2,47 @@
 /**
  * Simple noinclude / onlyinclude implementation. Strips all tokens in
  * noinclude sections.
- *
- * @author Gabriel Wicke <gwicke@wikimedia.org>
  */
 
-var Collector = require( './ext.util.TokenAndAttrCollector.js' ).TokenAndAttrCollector;
+var Collector = require( './ext.util.TokenCollector.js' ).TokenCollector;
+
+// define some constructor shortcuts
+var defines = require('./mediawiki.parser.defines.js');
+var KV = defines.KV,
+    TagTk = defines.TagTk,
+    SelfclosingTagTk = defines.SelfclosingTagTk,
+    EndTagTk = defines.EndTagTk,
+    EOFTk = defines.EOFTk;
 
 /**
  * This helper function will build a meta token in the right way for these
  * tags.
  */
-var buildMetaToken = function ( manager, tokenName, isEnd, tsr ) {
-	var metaToken, tokenAttribs;
-
+var buildMetaToken = function ( manager, tokenName, isEnd, tsr, src ) {
 	if ( isEnd ) {
 		tokenName += '/End';
 	}
 
-	tokenAttribs = [ new KV( 'typeof', tokenName ) ];
-	metaToken = new SelfclosingTagTk( 'meta', tokenAttribs );
-
-	if ( tsr ) {
-		metaToken.dataAttribs.tsr = tsr;
-		metaToken.dataAttribs.src = metaToken.getWTSource( manager.env );
-	}
-
-	return metaToken;
+	return new SelfclosingTagTk('meta',
+		[ new KV( 'typeof', tokenName ) ],
+		tsr ? { tsr: tsr, src: manager.env.page.src.substring(tsr[0], tsr[1]) } : { src: src }
+	);
 };
 
 var buildStrippedMetaToken = function ( manager, tokenName, startDelim, endDelim ) {
-	var tokens = [],
-		da, t0, tsr0,
-	da = startDelim.dataAttribs;
-	tsr0 = da ? da.tsr : null;
-	t0 = tsr0 ? tsr0[0] : null;
+	var da = startDelim.dataAttribs,
+		tsr0 = da ? da.tsr : null,
+		t0 = tsr0 ? tsr0[0] : null,
+		t1, tsr1;
 
-	var t1, tsr1;
 	if (endDelim) {
 		da = endDelim ? endDelim.dataAttribs : null;
 		tsr1 = da ? da.tsr : null;
 		t1 = tsr1 ? tsr1[1] : null;
 	} else {
-		t1 = manager.env.text.length;
+		t1 = manager.env.page.src.length;
 	}
+
 	return buildMetaToken(manager, tokenName, false, [t0, t1]);
 };
 
@@ -72,10 +70,12 @@ function OnlyInclude( manager, options ) {
 OnlyInclude.prototype.rank = 0.01; // Before any further processing
 
 OnlyInclude.prototype.onOnlyInclude = function ( token, manager ) {
+	var tsr = (token.dataAttribs || {}).tsr;
+	var src = tsr[1] ? token.getWTSource( manager.env ) : undefined;
 	var attribs = [
-			new KV( 'typeof', 'mw:OnlyInclude' + ( token instanceof EndTagTk ? '/End' : '' ) )
+			new KV( 'typeof', 'mw:Includes/OnlyInclude' + ( token instanceof EndTagTk ? '/End' : '' ) )
 		],
-		meta = new SelfclosingTagTk( 'meta', attribs );
+		meta = new SelfclosingTagTk( 'meta', attribs, { tsr: tsr, src: src } );
 	return { token: meta };
 };
 
@@ -105,13 +105,13 @@ OnlyInclude.prototype.onAnyInclude = function ( token, manager ) {
 	if ( isTag ) {
 		switch ( token.name ) {
 			case 'onlyinclude':
-				tagName = 'mw:OnlyInclude';
+				tagName = 'mw:Includes/OnlyInclude';
 				break;
 			case 'includeonly':
-				tagName = 'mw:IncludeOnly';
+				tagName = 'mw:Includes/IncludeOnly';
 				break;
 			case 'noinclude':
-				tagName = 'mw:NoInclude';
+				tagName = 'mw:Includes/NoInclude';
 		}
 	}
 
@@ -122,11 +122,11 @@ OnlyInclude.prototype.onAnyInclude = function ( token, manager ) {
 			this.foundOnlyInclude = true;
 			this.inOnlyInclude = true;
 			// wrap collected tokens into meta tag for round-tripping
-			meta = curriedBuildMetaToken( token.constructor === EndTagTk );
+			meta = curriedBuildMetaToken( token.constructor === EndTagTk, (token.dataAttribs || {}).tsr );
 			return meta;
 		} else {
 			this.inOnlyInclude = false;
-			meta = curriedBuildMetaToken( token.constructor === EndTagTk );
+			meta = curriedBuildMetaToken( token.constructor === EndTagTk, (token.dataAttribs || {}).tsr);
 		}
 		//meta.rank = this.rank;
 		return { token: meta };
@@ -141,162 +141,90 @@ OnlyInclude.prototype.onAnyInclude = function ( token, manager ) {
 	}
 };
 
-function defaultNestedDelimiterHandler(nestedDelimiterInfo) {
-	// Always clone the container token before modifying it
-	var token = nestedDelimiterInfo.token.clone();
-
-	// Strip the delimiter token wherever it is nested
-	// and strip upto/from the delimiter depending on the
-	// token type and where in the stream we are.
-	var i = nestedDelimiterInfo.attrIndex;
-	var delimiter = nestedDelimiterInfo.delimiter;
-	var isOpenTag = delimiter.constructor === TagTk;
-	var stripFrom = ((delimiter.name === "noinclude") && isOpenTag) ||
-					((delimiter.name === "includeOnly") && !isOpenTag);
-	var stripUpto = ((delimiter.name === "noinclude") && !isOpenTag) ||
-					((delimiter.name === "includeOnly") && isOpenTag);
-
-	if (nestedDelimiterInfo.k >= 0) {
-		if (stripFrom) {
-			token.attribs.splice(i+1);
-			token.attribs[i].k.splice(nestedDelimiterInfo.k);
-		}
-		if (stripUpto) {
-			// Since we are stripping upto the delimiter,
-			// change the token to a simple span.
-			// SSS FIXME: For sure in the case of table tags (tr,td,th,etc.) but, always??
-			token.name = 'span';
-			token.attribs.splice(0, i);
-			i = 0;
-			token.attribs[i].k.splice(0, nestedDelimiterInfo.k);
-		}
-
-		// default -- not sure when this might be triggered
-		if (!stripFrom && !stripUpto) {
-			token.attribs[i].k.splice(nestedDelimiterInfo.k, 1);
-		}
-		token.attribs[i].ksrc = undefined;
-	} else {
-		if (stripFrom) {
-			token.attribs.splice(i+1);
-			token.attribs[i].v.splice(nestedDelimiterInfo.v);
-		}
-		if (stripUpto) {
-			// Since we are stripping upto the delimiter,
-			// change the token to a simple span.
-			// SSS FIXME: For sure in the case of table tags (tr,td,th,etc.) but, always??
-			token.name = 'span';
-			token.attribs.splice(0, i);
-			i = 0;
-			token.attribs[i].v.splice(0, nestedDelimiterInfo.v);
-		}
-
-		// default -- not sure when this might be triggered
-		if (!stripFrom && !stripUpto) {
-			token.attribs[i].v.splice(nestedDelimiterInfo.v, 1);
-		}
-		token.attribs[i].vsrc = undefined;
-	}
-
-	return {containerToken: token, delimiter: delimiter};
-}
-
 function noIncludeHandler(manager, options, collection) {
-	var tokens = [];
+	var start = collection.shift();
 
-	// Deal with nested opening delimiter found in another token
-	if (collection.start.constructor !== TagTk) {
-		// FIXME: May use other handlers later.
-		// May abort collection, convert to text, whatever ....
-		// For now, this is just an intermediate solution while we
-		// figure out other smarter strategies and how to plug them in here.
-		tokens.push(defaultNestedDelimiterHandler(collection.start).containerToken);
+	// Handle self-closing tag case specially!
+	if (start.constructor === SelfclosingTagTk) {
+		return (options.isInclude) ?
+			{ tokens: [] } :
+			{ tokens: [ buildMetaToken(manager, 'mw:Includes/NoInclude', false, (start.dataAttribs || {}).tsr) ] };
 	}
+
+	var tokens = [],
+		end = collection.pop(),
+		eof = end.constructor === EOFTk;
 
 	if (!options.isInclude) {
 		// Content is preserved
-		var curriedBuildMetaToken = buildMetaToken.bind( null, manager, 'mw:NoInclude' ),
-			// TODO: abstract this!
-			startTSR = collection.start &&
-				collection.start.dataAttribs &&
-				collection.start.dataAttribs.tsr,
-			endTSR = collection.end &&
-				collection.end.dataAttribs &&
-				collection.end.dataAttribs.tsr;
+		// Add meta tags for open and close
+		var curriedBuildMetaToken = buildMetaToken.bind( null, manager, 'mw:Includes/NoInclude' ),
+			startTSR = start && start.dataAttribs && start.dataAttribs.tsr,
+			endTSR = end && end.dataAttribs && end.dataAttribs.tsr;
 		tokens.push(curriedBuildMetaToken(false, startTSR));
-		tokens = tokens.concat(collection.tokens);
-		if ( collection.end ) {
+		tokens = tokens.concat(collection);
+		if (end && !eof) {
 			tokens.push(curriedBuildMetaToken(true, endTSR));
-		} else if ( tokens.last().constructor === EOFTk ) {
-			tokens.pop();
 		}
 	} else if (options.wrapTemplates) {
-		// content is stripped
-		tokens.push(buildStrippedMetaToken(manager, 'mw:NoInclude',
-					collection.start, collection.end));
+		// Content is stripped
+		tokens.push(buildStrippedMetaToken(manager, 'mw:Includes/NoInclude', start, end));
 	}
 
-	// Deal with nested closing delimiter found in another token
-	if (collection.end && collection.end.constructor !== EndTagTk) {
-		tokens.push(defaultNestedDelimiterHandler(collection.end).containerToken);
+	// Preserve EOF
+	if (eof) {
+		tokens.push(end);
 	}
 
 	return { tokens: tokens };
 }
 
 function NoInclude( manager, options ) {
+	/* jshint nonew:false */
 	new Collector(
 			manager,
 			noIncludeHandler.bind(null, manager, options),
 			true, // match the end-of-input if </noinclude> is missing
 			0.02, // very early in stage 1, to avoid any further processing.
+			'tag',
 			'noinclude'
 			);
 }
 
 function includeOnlyHandler(manager, options, collection) {
-	// Deal with nested opening delimiter found in another token
-	var startDelim, startHead;
-	if (collection.start.constructor !== TagTk) {
-		// FIXME: May use other handlers later.
-		// May abort collection, convert to text, whatever ....
-		// For now, this is just an intermediate solution while we
-		// figure out other smarter strategies and how to plug them in here.
-		var s = defaultNestedDelimiterHandler(collection.start);
-		startHead  = s.containerToken;
-		startDelim = s.delimiter;
-	} else {
-		startDelim = collection.start;
+	var start = collection.shift();
+
+	// Handle self-closing tag case specially!
+	if (start.constructor === SelfclosingTagTk) {
+		return (options.isInclude) ?
+			{ tokens: [] } :
+			{ tokens: [ buildMetaToken(manager, 'mw:Includes/IncludeOnly', false, (start.dataAttribs || {}).tsr) ] };
 	}
 
-	// Deal with nested closing delimiter found in another token
-	var endDelim, endTail;
-	if (collection.end) {
-		if (collection.end.constructor !== EndTagTk) {
-			var e = defaultNestedDelimiterHandler(collection.end);
-			endTail  = e.containerToken;
-			endDelim = e.delimiter;
-		} else {
-			endDelim = collection.end;
-		}
-	}
-
-	var tokens = [];
-	if (startHead) {
-		tokens.push(startHead);
-	}
+	var tokens = [],
+		end = collection.pop(),
+		eof = end.constructor === EOFTk;
 
 	if (options.isInclude) {
 		// Just pass through the full collection including delimiters
-		tokens = tokens.concat(collection.tokens);
+		tokens = tokens.concat(collection);
 	} else if (options.wrapTemplates) {
-		// Content is stripped, add a meta for round-tripping
-		tokens.push(buildStrippedMetaToken(manager, 'mw:IncludeOnly',
-					startDelim, endDelim));
+		// Content is stripped
+		// Add meta tags for open and close for roundtripping.
+		//
+		// We can make do entirely with a single meta-tag since
+		// there is no real content.  However, we add a dummy end meta-tag
+		// so that all <*include*> meta tags show up in open/close pairs
+		// and can be handled similarly by downstream handlers.
+		tokens.push(buildStrippedMetaToken(manager, 'mw:Includes/IncludeOnly', start, eof ? null : end ));
+		if ( end && !eof) {
+			tokens.push(buildMetaToken(manager, 'mw:Includes/IncludeOnly', true, null, ''));
+		}
 	}
 
-	if (endTail) {
-		tokens.push(endTail);
+	// Preserve EOF
+	if (eof) {
+		tokens.push(end);
 	}
 
 	return { tokens: tokens };
@@ -305,11 +233,13 @@ function includeOnlyHandler(manager, options, collection) {
 // XXX: Preserve includeonly content in meta tag (data attribute) for
 // round-tripping!
 function IncludeOnly( manager, options ) {
+	/* jshint nonew:false */
 	new Collector(
 			manager,
 			includeOnlyHandler.bind(null, manager, options),
 			true, // match the end-of-input if </noinclude> is missing
 			0.03, // very early in stage 1, to avoid any further processing.
+			'tag',
 			'includeonly'
 			);
 }

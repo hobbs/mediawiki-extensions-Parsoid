@@ -2,7 +2,18 @@
  * output matches the expected output listed here, the test can be marked as
  * passing in parserTests.js. */
 
-testWhiteList = {};
+// CSA note: This whitelist dates back to when parsoid was an experiment,
+// and there wasn't "php"/"parsoid" support in upstream's parserTests.  Now
+// that Parsoid is mainstream, I'm trying to deprecate this file and move
+// the tweaked tests upstream to mediawiki/core (splitting tests into 'php'
+// and 'parsoid' versions where necessary).  This helps document the
+// differences between the PHP and Parsoid parsers in one place (albeit
+// one gigantic hard-to-read file, but still).
+// So please don't add new entries here, except for experimental stuff
+// (selser?) which we're not sure we want to document/upstream.
+// Known-broken-but-we'll-fix-it stuff goes in parserTests-blacklist.js
+
+var testWhiteList = {};
 
 // Valid, but the PHP parser strips the empty tags out for giggles.
 testWhiteList["Italics and bold: 2-quote opening sequence: (2,5)"] = "<p><i>foo</i><b></b></p>";
@@ -43,11 +54,6 @@ testWhiteList["Definition Lists: Weird Ones: Test 1"] = "<ul><li><ol><li><dl><dt
 // output.
 testWhiteList["Bug 2702: Mismatched <i>, <b> and <a> tags are invalid"] = "<p><i><a href=\"http://example.com\">text</a></i><a href=\"http://example.com\"><b>text</b></a><i>Something <a href=\"http://example.com\">in italic</a></i><i>Something <a href=\"http://example.com\">mixed</a></i><a href=\"http://example.com\"><b>, even bold</b></a><i><b>Now <a href=\"http://example.com\">both</a></b></i></p>";
 
-// The expected result for this test is really broken html.
-testWhiteList["Link containing double-single-quotes '' in text embedded in italics (bug 4598 sanity check)"] = "<p><i>Some <a rel=\"mw:WikiLink\" href=\"Link\" data-parsoid=\"{&quot;tsr&quot;:[7,44],&quot;contentPos&quot;:[13,42],&quot;src&quot;:&quot;[[Link|pretty ''italics'' and stuff]]&quot;}\">pretty </a></i><a rel=\"mw:WikiLink\" href=\"Link\" data-parsoid=\"{&quot;tsr&quot;:[7,44],&quot;contentPos&quot;:[13,42],&quot;src&quot;:&quot;[[Link|pretty ''italics'' and stuff]]&quot;}\">italics<i> and stuff</i></a><i>!</i></p>";
-
-testWhiteList["External link containing double-single-quotes in text embedded in italics (bug 4598 sanity check)"] = "<p><i>Some <a href=\"http://example.com/\">pretty </a></i><a href=\"http://example.com/\">italics<i> and stuff</i></a><i>!</i></p>";
-
 // This is a rare edge case, and the new behavior is arguably more consistent
 testWhiteList["5 quotes, code coverage +1 line"] = "<p><i><b></b></i></p>";
 
@@ -57,7 +63,7 @@ testWhiteList["A table with nothing but a caption"] = "<table><caption> caption<
 
 // We preserve the trailing whitespace in a table cell, while the PHP parser
 // strips it. It renders the same, and round-trips with the space.
-testWhiteList["Table rowspan"] = "<table border=\"1\" data-parsoid=\"{&quot;tsr&quot;:[0,11],&quot;bsp&quot;:[0,121]}\">\n<tbody><tr><td data-parsoid=\"{&quot;tsr&quot;:[12,13]}\"> Cell 1, row 1 \n</td><td rowspan=\"2\" data-parsoid=\"{&quot;tsr&quot;:[29,40]}\"> Cell 2, row 1 (and 2) \n</td><td data-parsoid=\"{&quot;tsr&quot;:[64,65]}\"> Cell 3, row 1 \n</td></tr><tr data-parsoid=\"{&quot;tsr&quot;:[81,84]}\">\n<td data-parsoid=\"{&quot;tsr&quot;:[85,86]}\"> Cell 1, row 2 \n</td><td data-parsoid=\"{&quot;tsr&quot;:[102,103]}\"> Cell 3, row 2 \n</td></tr></tbody></table>";
+//testWhiteList["Table rowspan"] = "<table border=\"1\" data-parsoid=\"{&quot;tsr&quot;:[0,11],&quot;bsp&quot;:[0,121]}\">\n<tbody><tr><td data-parsoid=\"{&quot;tsr&quot;:[12,13]}\"> Cell 1, row 1 \n</td><td rowspan=\"2\" data-parsoid=\"{&quot;tsr&quot;:[29,40]}\"> Cell 2, row 1 (and 2) \n</td><td data-parsoid=\"{&quot;tsr&quot;:[64,65]}\"> Cell 3, row 1 \n</td></tr><tr data-parsoid=\"{&quot;tsr&quot;:[81,84]}\">\n<td data-parsoid=\"{&quot;tsr&quot;:[85,86]}\"> Cell 1, row 2 \n</td><td data-parsoid=\"{&quot;tsr&quot;:[102,103]}\"> Cell 3, row 2 \n</td></tr></tbody></table>";
 
 // The PHP parser strips the hash fragment for non-existent pages, but Parsoid does not.
 // TODO: implement link target detection in a DOM postprocessor or on the client
@@ -108,7 +114,7 @@ testWhiteList["Link containing % as a double hex sequence interpreted to hex seq
 
 // This is a test for stripping IDN ignored characters out of a link. The expected result (apparently) is that the IDN character
 // should not be present in the text of the link. But Gabriel and Mark decided that that made very little sense. Hence, whitelist.
-testWhiteList["External links: IDN ignored character reference in hostname; strip it right off"] = "<p><a rel=\"mw:ExtLink/URL\" href=\"http://example.com/\">http://e‌xample.com/</a></p>";
+testWhiteList["External links: IDN ignored character reference in hostname; strip it right off"] = "<p><a rel=\"mw:ExtLink/URL\" href=\"http://example.com/\">http://e\u200cxample.com/</a></p>";
 
 if (typeof module === "object") {
 	module.exports.testWhiteList = testWhiteList;

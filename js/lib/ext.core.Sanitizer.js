@@ -5,20 +5,30 @@
  * can bypass sanitation by setting their rank to 3.
  *
  * A large part of this code is a straight port from the PHP version.
- *
- * @author Gabriel Wicke <gwicke@wikimedia.org>
  */
 
+"use strict";
+
 require('./mediawiki.parser.defines.js');
-var Util = require('./mediawiki.Util.js').Util;
-var WikitextConstants = require('./mediawiki.wikitext.constants.js').WikitextConstants;
+var JSUtils = require('./jsutils.js').JSUtils,
+	Util = require('./mediawiki.Util.js').Util,
+    defines = require('./mediawiki.parser.defines.js'),
+	WikitextConstants = require('./mediawiki.wikitext.constants.js').WikitextConstants;
+
+// define some constructor shortcuts
+var TagTk = defines.TagTk,
+    SelfclosingTagTk = defines.SelfclosingTagTk,
+    EndTagTk = defines.EndTagTk;
+
+/**
+ * @class SanitizerModule
+ * @singleton
+ */
 
 var SanitizerConstants = {
-	// FIXME: Assumptions:
-	// 1. This is "constant" and wont be modified during execution.
-	//    (if modified, you might get inconsistent results -- is there
-	//    a way to protect attribtues from modification?)
-	// 2. All sanitizer have the same global config.
+	// Assumptions:
+	// 1. This is "constant" -- enforced via Util.deepFreeze.
+	// 2. All sanitizers have the same global config.
 	globalConfig: {
 		allowRdfaAttrs: true,
 		allowMicrodataAttrs: true,
@@ -423,7 +433,7 @@ var SanitizerConstants = {
 				// address
 
 				// 8.2.4
-				// bdo
+				'bdo'        : common,
 
 				// 9.2.1
 				'em'         : common,
@@ -439,7 +449,7 @@ var SanitizerConstants = {
 
 				// 9.2.2
 				'blockquote' : common.concat( [ 'cite' ]),
-				// q
+				'q'          : common.concat( [ 'cite' ]),
 
 				// 9.2.3
 				'sub'        : common,
@@ -535,8 +545,13 @@ var SanitizerConstants = {
 				// http://www.w3.org/TR/REC-MathML/
 				'math'       : [ 'class', 'style', 'id', 'title' ],
 
+				// HTML 5 section 4.5
+				'figure'     : common,
+				'figcaption' : common,
+
 				// HTML 5 section 4.6
-				'bdi' : common
+				'bdi' : common,
+				'wbr' : [ 'id', 'class', 'title', 'style' ]
 			};
 		}
 
@@ -544,36 +559,44 @@ var SanitizerConstants = {
 		// self-closing version might be legal.
 		this.noEndTagHash = { br: 1 };
 
-		this.tagWhiteListHash = Util.arrayToHash(WikitextConstants.Sanitizer.TagWhiteList);
-		this.validProtocolsRE = new RegExp("^(" + this.validUrlProtocols.join('|') + ")$" );
+		this.validProtocolsRE = new RegExp("^(" + this.validUrlProtocols.join('|') + ")$", "i" );
 		//|/?[^/])[^\\s]+$");
 		this.cssDecodeRE = computeCSSDecodeRegexp();
 		this.attrWhiteList = computeAttrWhiteList(this.globalConfig);
-		this.attrWhiteListCache = {};
 	}
 };
 
 // init caches, convert lists to hashtables, etc.
 SanitizerConstants.setDerivedConstants();
 
+// Freeze it blocking all accidental changes
+JSUtils.deepFreeze(SanitizerConstants);
+
+/**
+ * @class
+ *
+ * @constructor
+ * @param {TokenTransformManager} manager The manager for this part of the pipeline.
+ */
 function Sanitizer ( manager ) {
 	this.manager = manager;
 	this.register( manager );
 	this.constants = SanitizerConstants;
+	this.attrWhiteListCache = {};
 }
 
 Sanitizer.prototype.getAttrWhiteList = function(tag) {
-	var awlCache = this.constants.attrWhiteListCache;
+	var awlCache = this.attrWhiteListCache;
 	if (!awlCache[tag]) {
-		awlCache[tag] = Util.arrayToHash(this.constants.attrWhiteList[tag] || []);
+		awlCache[tag] = JSUtils.arrayToHash(this.constants.attrWhiteList[tag] || []);
 	}
 
 	return awlCache[tag];
 };
 
 // constants
-Sanitizer.prototype.handledRank = 2.99;
-Sanitizer.prototype.anyRank = 2.9901;
+Sanitizer.prototype.handledRank = 2.90;
+Sanitizer.prototype.anyRank = 2.91;
 
 // Register this transformer with the TokenTransformer
 Sanitizer.prototype.register = function ( manager ) {
@@ -587,25 +610,25 @@ Sanitizer._stripIDNs = function ( host ) {
 };
 
 Sanitizer.prototype.sanitizeHref = function ( href ) {
-		var bits = href.match( /(.*?\/\/)([^\/]+)(\/?.*)/ ),
-			proto, host, path;
-		if ( bits ) {
-			proto = bits[1];
-			host = bits[2];
-			path = bits[3];
-			if ( ! proto.match(this.hrefRE)) {
-				// invalid proto, disallow URL
-				return null;
-			}
-		} else {
-			proto = '';
-			host = '';
-			path = href;
+	// protocol needs to begin with a letter (ie, .// is not a protocol)
+	var bits = href.match( /^((?:\w.*?)?\/\/)([^\/]+)(\/?.*)/ ),
+		proto, host, path;
+	if ( bits ) {
+		proto = bits[1];
+		host = bits[2];
+		path = bits[3];
+		if ( ! proto.match(this.manager.env.conf.wiki.protocolRegex)) {
+			// invalid proto, disallow URL
+			return null;
 		}
-		host = Sanitizer._stripIDNs( host );
+	} else {
+		proto = '';
+		host = '';
+		path = href;
+	}
+	host = Sanitizer._stripIDNs( host );
 
-		return proto + host + path;
-
+	return proto + host + path;
 };
 
 Sanitizer.prototype.onAnchor = function ( token ) {
@@ -620,11 +643,13 @@ Sanitizer.prototype.onAnchor = function ( token ) {
 	if ( hrefKV !== null ) {
 		var origHref = Util.tokensToString( hrefKV.v ),
 			newHref = this.sanitizeHref( origHref );
-		if ( newHref !== null ) {
-			hrefKV.v = newHref;
-		} else {
+		if ( newHref === null ) {
+			token = token.clone();
 			token.removeAttribute( 'href' );
 			token.setShadowInfo('href', newHref, origHref);
+		} else if (newHref !== origHref) {
+			token = token.clone();
+			hrefKV.v = newHref;
 		}
 	}
 
@@ -644,11 +669,10 @@ Sanitizer.prototype.onAny = function ( token ) {
 
 	var i,l,k,v,kv;
 	var attribs = token.attribs;
-	var tagWLHash = this.constants.tagWhiteListHash,
-		noEndTagHash = this.constants.noEndTagHash;
+	var noEndTagHash = this.constants.noEndTagHash;
 
 	if (token.isHTMLTag && token.isHTMLTag() &&
-			( !tagWLHash[token.name] ||
+			(!( token.name.toUpperCase() in WikitextConstants.Sanitizer.TagWhiteList ) ||
 			  ( token.constructor === EndTagTk && noEndTagHash[token.name] )
 			)
 		)
@@ -688,20 +712,18 @@ Sanitizer.prototype.onAny = function ( token ) {
 					k = kv.k;
 					v = kv.v;
 
+					var newKV = Util.clone(kv);
 					if ( k.constructor === Array ) {
-						k = Util.tokensToString ( k );
+						newKV.k = Util.tokensToString ( k );
 					}
 					if ( v.constructor === Array ) {
-						v = Util.tokensToString ( v );
+						newKV.v = Util.tokensToString ( v );
 					}
-					attribs[i] = new KV( k, v );
-					if ( kv.ksrc ) {
-						attribs[i].ksrc = kv.ksrc;
-					}
+					attribs[i] = newKV;
 				}
 			}
 
-			// Sanitize attribues
+			// Sanitize attributes
 			if (token.constructor === TagTk) {
 				this.sanitizeTagAttrs(newToken, attribs);
 			}
@@ -717,6 +739,8 @@ Sanitizer.prototype.onAny = function ( token ) {
  * If the named entity is defined in the HTML 4.0/XHTML 1.0 DTD,
  * return the UTF-8 encoding of that character. Otherwise, returns
  * pseudo-entity source (eg "&foo;")
+ *
+ * gwicke: Use Util.decodeEntities instead?
  */
 Sanitizer.prototype.decodeEntity = function(name) {
 	if (this.constants.htmlEntityAliases[name]) {
@@ -759,6 +783,27 @@ Sanitizer.prototype.decodeCharReferences = function ( text ) {
 };
 
 Sanitizer.prototype.checkCss = function (text) {
+	function removeMismatchedQuoteChar(str, quoteChar) {
+		var re1, re2;
+		if (quoteChar === "'") {
+			re1 = /'/g;
+			re2 = /'([^'\n\r\f]*)$/;
+		} else {
+			re1 = /"/g;
+			re2 = /"([^"\n\r\f]*)$/;
+		}
+
+		var mismatch = ((str.match(re1) || []).length) % 2 === 1;
+		if (mismatch) {
+			str = str.replace(re2, function() {
+				// replace the mismatched quoteChar with a space
+				return " " + arguments[1];
+			});
+		}
+
+		return str;
+	}
+
 	// Decode character references like &#123;
 	text = this.decodeCharReferences(text);
 	text = text.replace(this.constants.cssDecodeRE, function() {
@@ -791,6 +836,20 @@ Sanitizer.prototype.checkCss = function (text) {
 	// sequences, because it replaces comments with spaces rather
 	// than removing them completely.
 	text = text.replace(/\/\*.*\*\//g, ' ');
+
+	// Fix up unmatched double-quote and single-quote chars
+	// Full CSS syntax here: http://www.w3.org/TR/CSS21/syndata.html#syntax
+	//
+	// This can be converted to a function and called once for ' and "
+	// but we have to construct 4 different REs anyway
+	text = removeMismatchedQuoteChar(text, "'");
+	text = removeMismatchedQuoteChar(text, '"');
+
+	/* --------- shorter but less efficient alternative to removeMismatchedQuoteChar ------------
+	text = text.replace(/("[^"\n\r\f]*")+|('[^'\n\r\f]*')+|([^'"\n\r\f]+)|"([^"\n\r\f]*)$|'([^'\n\r\f]*)$/g, function() {
+		return arguments[1] || arguments[2] || arguments[3] || arguments[4]|| arguments[5];
+	});
+	* ----------------------------------- */
 
 	// Remove anything after a comment-start token, to guard against
 	// incorrect client implementations.
@@ -825,7 +884,6 @@ Sanitizer.prototype.sanitizeTagAttrs = function(newToken, attrs) {
 	var html5Mode = this.constants.globalConfig.html5Mode;
 	var xmlnsRE   = this.constants.XMLNS_ATTRIBUTE_RE;
 	var evilUriRE = this.constants.EVIL_URI_RE;
-	var hrefRE    = this.constants.validProtocolsRE;
 
 	var wlist = this.getAttrWhiteList(tag);
 	//console.warn('wlist: ' + JSON.stringify(wlist));
@@ -850,10 +908,14 @@ Sanitizer.prototype.sanitizeTagAttrs = function(newToken, attrs) {
 			continue;
 		}
 
-		// Allow any attribute beginning with "data-", if in HTML5 mode
-		if (!(html5Mode && k.match(/^data-/i)) && !wlist[k]) {
-			newAttrs[k] = [null, origV, origK];
-			continue;
+		// SSS FIXME: Temporary hack to let wrapped extension tags through
+		// so that they can be unwrapped.
+		if (k !== 'typeof') {
+			// Allow any attribute beginning with "data-", if in HTML5 mode
+			if (!(html5Mode && k.match(/^data-/i)) && wlist[k] !== true) {
+				newAttrs[k] = [null, origV, origK];
+				continue;
+			}
 		}
 
 		// Strip javascript "expression" from stylesheets.

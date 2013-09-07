@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Tokenizer for wikitext, using PEG.js and a separate PEG grammar file
  * (pegTokenizer.pegjs.txt)
@@ -7,39 +6,62 @@
  * output.
  *
  */
+"use strict";
 
 var PEG = require('pegjs'),
 	path = require('path'),
 	LRU = require("lru-cache"),
 	fs = require('fs'),
-	$ = require('jquery'),
 	events = require('events'),
-	//colors = require('colors'),
-	Util = require('./mediawiki.Util.js'),
-	defines = require('./mediawiki.parser.defines.js');
+	util = require('util');
 
-function PegTokenizer( env, canCache ) {
+function PegTokenizer( env, options ) {
+	events.EventEmitter.call(this);
 	this.env = env;
-	this.Util = Util.Util;
-	this.canCache = canCache;
+	this.options = options || {};
+	this.offsets = {};
+	this.canCache = this.options.canCache;
 	if ( this.canCache ) {
 		this.cacheAccum = { chunks: [] };
 	}
 }
 
 // Inherit from EventEmitter
-PegTokenizer.prototype = new events.EventEmitter();
-PegTokenizer.prototype.constructor = PegTokenizer;
+util.inherits(PegTokenizer, events.EventEmitter);
 
 PegTokenizer.src = false;
+
+/*
+ * Process text.  The text is tokenized in chunks and control
+ * is yielded to the event loop after each top-level block is
+ * tokenized enabling the tokenized chunks to be processed at
+ * the earliest possible opportunity.
+ */
+PegTokenizer.prototype.process = function( text, cacheKey ) {
+	this._processText(text, false, cacheKey);
+};
+
+/**
+ * Set start and end offsets of the source that generated this DOM
+ */
+PegTokenizer.prototype.setSourceOffsets = function(start, end) {
+	this.offsets.startOffset = start;
+	this.offsets.endOffset = end;
+};
+
+/*
+ * Process text synchronously -- the text is tokenized in one shot
+ */
+PegTokenizer.prototype.processSync = function( text, cacheKey ) {
+	this._processText(text, true, cacheKey);
+};
 
 /*
  * The main worker. Sets up event emission ('chunk' and 'end' events).
  * Consumers are supposed to register with PegTokenizer before calling
  * process().
  */
-PegTokenizer.prototype.process = function( text, cacheKey ) {
-	var out, err;
+PegTokenizer.prototype._processText = function( text, fullParse, cacheKey ) {
 	if ( !this.tokenizer ) {
 		// Construct a singleton static tokenizer.
 		var pegSrcPath = path.join( __dirname, 'pegTokenizer.pegjs.txt' );
@@ -61,11 +83,19 @@ PegTokenizer.prototype.process = function( text, cacheKey ) {
 		* requires to the source.
 		*/
 		tokenizerSource = tokenizerSource.replace( 'parse: function(input, startRule) {',
-					'parse: function(input, startRule) { var __parseArgs = arguments;' )
+					'parse: function(input, startRule) { var pegArgs = arguments[2];' )
 						// Include the stops key in the cache key
 						.replace(/var cacheKey = "[^@"]+@" \+ pos/g,
 								function(m){ return m +' + stops.key'; });
+		// replace trailing whitespace, to make jshint happier.
+		tokenizerSource = tokenizerSource.replace(/[ \t]+$/mg, '');
+		// add jshint config
+		tokenizerSource =
+			'/* jshint loopfunc:true, latedef:false, nonstandard:true */\n' +
+			tokenizerSource + ';';
+
 		// eval is not evil in the case of a grammar-generated tokenizer.
+		/* jshint evil:true */
 		//console.warn( tokenizerSource );
 		PegTokenizer.prototype.tokenizer = eval( tokenizerSource );
 		// alias the parse method
@@ -82,7 +112,7 @@ PegTokenizer.prototype.process = function( text, cacheKey ) {
 				//console.warn( JSON.stringify( maybeCached, null, 2 ) );
 				for ( var i = 0, l = maybeCached.length; i < l; i++ ) {
 					var cachedChunk = maybeCached[i];
-					if (this.env.trace) {
+					if (this.env.conf.parsoid.trace) {
 						this.env.tracer.outputChunk(cachedChunk);
 					}
 					// emit a clone of this chunk
@@ -110,30 +140,51 @@ PegTokenizer.prototype.process = function( text, cacheKey ) {
 	} else {
 		chunkCB = this.emit.bind( this, 'chunk' );
 	}
-	// XXX: Commented out exception handling during development to get
-	// reasonable traces.
-	if ( ! this.env.debug ) {
+
+	// Kick it off!
+	var srcOffset = this.offsets.startOffset || 0;
+	var args = { cb: chunkCB, pegTokenizer: this, srcOffset: srcOffset, env: this.env };
+	if (fullParse) {
+		if ( ! this.env.conf.parsoid.debug ) {
+			try {
+				this.tokenizer.tokenize(text, 'start', args);
+			} catch (e) {
+				this.env.errCB(e);
+			}
+		} else {
+			this.tokenizer.tokenize(text, 'start', args);
+		}
+		this.onEnd();
+	} else {
+		this.tokenizeAsync(text, srcOffset, chunkCB);
+	}
+};
+
+PegTokenizer.prototype.tokenizeAsync = function( text, srcOffset, cb ) {
+	var ret,
+		pegTokenizer = this,
+		args = { cb: cb, pegTokenizer: this, srcOffset: srcOffset, env: this.env };
+
+	if ( ! this.env.conf.parsoid.debug ) {
 		try {
-			this.tokenizer.tokenize(text, 'start',
-					// callback
-					chunkCB,
-					// inline break test
-					this
-					);
-			this.onEnd();
+			ret = this.tokenizer.tokenize(text, 'toplevelblock', args);
 		} catch (e) {
 			this.env.errCB(e);
-			//chunkCB( ['Tokenizer error in ' + cacheKey + ': ' + e.stack] );
-			//this.onEnd();
+			return;
 		}
 	} else {
-		this.tokenizer.tokenize(text, 'start',
-				// callback
-				chunkCB,
-				// inline break test
-				this
-				);
+		ret = this.tokenizer.tokenize(text, 'toplevelblock', args);
+	}
+
+	if (ret.eof) {
 		this.onEnd();
+	} else {
+		// Schedule parse of next chunk
+		process.nextTick(function() {
+			// console.warn("new input: " + JSON.stringify(ret.newInput));
+			// console.warn("offset   : " + ret.newOffset);
+			pegTokenizer.tokenizeAsync(ret.newInput, ret.newOffset, cb);
+		});
 	}
 };
 
@@ -155,22 +206,54 @@ PegTokenizer.prototype.onEnd = function ( ) {
 		this.cacheAccum = { chunks: [] };
 	}
 
+	// Reset source offsets
+	this.offsets.startOffset = undefined;
+	this.offsets.endOffset = undefined;
+
 	this.emit('end');
 };
 
-PegTokenizer.prototype.processImageOptions = function( text ) {
-		return this.tokenizer.tokenize(text, 'img_options', null, this );
+/**
+ * Tokenize via a production passed in as an arg.
+ * The text is tokenized synchronously in one shot.
+ */
+PegTokenizer.prototype.tokenize = function( text, production, args ) {
+	try {
+		// Some productions use callbacks: start, tlb, toplevelblock.
+		// All other productions return tokens directly.
+		var toks = [];
+		if (!args) {
+			args = {
+				cb: function(r) { toks = toks.concat(r); },
+				pegTokenizer: this,
+				srcOffset: this.offsets.startOffset || 0,
+				env: this.env
+			};
+		}
+		var retToks = this.tokenizer.tokenize(text, production, args);
+
+		if (retToks.constructor === Array && retToks.length > 0) {
+			toks = toks.concat(retToks);
+		}
+		return toks;
+	} catch ( e ) {
+		// console.warn("Input: " + text);
+		// console.warn("Rule : " + production);
+		// console.warn("ERROR: " + e);
+		// console.warn("Stack: " + e.stack);
+		return false;
+	}
 };
 
 /**
  * Tokenize a URL
  */
 PegTokenizer.prototype.tokenizeURL = function( text ) {
-	try {
-		return this.tokenizer.tokenize(text, 'url', null, this );
-	} catch ( e ) {
-		return false;
-	}
+	return this.tokenize(text, "url");
+};
+
+PegTokenizer.prototype.processImageOptions = function( text ) {
+	return this.tokenize(text, 'img_options');
 };
 
 /*
@@ -188,18 +271,19 @@ PegTokenizer.prototype.inline_breaks = function (input, pos, stops ) {
 					( pos === input.length - 1 ||
 					  input.substr( pos + 1 )
 						// possibly more equals followed by spaces or comments
-						.match(/^=*(?:[ \t]+|<\!--(?:(?!-->)[^\r\n])+-->)*(?:[\r\n]|$)/) !== null )
+						.match(/^=*(?:[ \t]|<\!--(?:(?!-->)[^\r\n])+-->)*(?:[\r\n]|$)/) !== null )
 				) || null;
 		case '|':
-			return stops.onStack( 'pipe' ) ||
-					//counters.template ||
-					counters.linkdesc ||
-				( stops.onStack('table') &&
-					( ( pos < input.length - 1 &&
-					  input[pos + 1].match(/[|}]/) !== null ) ||
-						counters.tableCellArg
+			return stops.onStack('pipe') ||
+				//counters.template ||
+				counters.linkdesc || (
+					stops.onStack('table') && (
+						counters.tableCellArg || (
+							pos < input.length - 1 && input[pos+1].match(/[}|]/) !== null
+						)
 					)
-				) || null;
+				) ||
+				null;
 		case '{':
 			// {{!}} pipe templates..
 			return (
@@ -227,7 +311,7 @@ PegTokenizer.prototype.inline_breaks = function (input, pos, stops ) {
 				input.substr(pos).match(/\r\n?\s*[!|]/) !== null ||
 				null;
 		case "\n":
-			//console.warn(input.substr(pos, 5));
+			//console.warn(JSON.stringify(input.substr(pos, 5)), stops);
 			return ( stops.onStack( 'table' ) &&
 				// allow leading whitespace in tables
 				input.substr(pos, 200).match( /^\n\s*[!|]/ ) ) ||

@@ -14,7 +14,7 @@
 	"noarg": true,
 	"noempty": true,
 	"nonew": true,
-	"regexp": true,
+	"regexp": false,
 	"undef": true,
 	"strict": false,
 	"trailing": true,
@@ -22,10 +22,9 @@
 	"smarttabs": true,
 	"multistr": true,
 
-	"browser": true,
 	"node": true,
-	"jquery": true,
 
-	"nomen": true
+	"nomen": false,
+	"loopfunc": true
 	//"onevar": true
 }

@@ -1,18 +1,105 @@
-"use strict";
 /**
- * General utilities for token transforms
+ * This file contains general utilities for token transforms.
  */
+/* jshint nonstandard:true */ // define 'unescape'
 
-var HTML5 = require( 'html5' ).HTML5,
-	path = require('path'),
-	$ = require( 'jquery' ),
+"use strict";
+
+var domino = require( './domino' ),
+	async = require('async'),
+	$ = require( './fakejquery' ),
 	jsDiff = require( 'diff' ),
+	entities = require( 'entities' ),
 	TemplateRequest = require( './mediawiki.ApiRequest.js' ).TemplateRequest,
+	Consts = require('./mediawiki.wikitext.constants.js').WikitextConstants;
 
-	Util = {
+/* WORKAROUND HACK to entities package, using domino. */
+// see https://github.com/fb55/node-entities/issues/8
+if ( /^0.2.[01]$/.test( require( 'entities/package.json' ).version ) ) {
+	entities.decodeHTML5 = function(data) {
+		return data.replace(/&(#\d+|#[xX][0-9a-fA-F]+|[A-Za-z]+);/g, function(e) {
+			return domino.createDocument('x'+e).body.textContent.substr(1);
+		});
+	};
+}
 
-	// Update only those properties that are undefined or null
-	// $.extend updates properties that are falsy (which means false gets updated as well)
+// This is a circular dependency.  Don't use anything from defines at module
+// evaluation time.  (For example, we can't define the usual local variable
+// shortcuts here.)
+var pd = require('./mediawiki.parser.defines.js');
+
+/**
+ * @class
+ * @singleton
+ */
+var Util = {
+
+	/**
+	 * @method
+	 *
+	 * Set debugging flags on an object, based on an options object.
+	 *
+	 * @param {Object} obj The object to modify.
+	 * @param {Object} opts The options object to use for setting the debug flags.
+	 * @returns {Object} The modified object.
+	 */
+	setDebuggingFlags: function(obj, opts) {
+		obj.debug = Util.booleanOption( opts.debug );
+		obj.trace = (opts.trace === true);
+		obj.traceFlags = opts.trace && opts.trace !== true ? opts.trace.split(",") : null;
+		obj.dumpFlags = opts.dump ? opts.dump.split(",") : null;
+
+		return obj;
+	},
+
+	/**
+	 * @method
+	 *
+	 * Parse a boolean option returned by the optimist package.
+	 * The strings 'false' and 'no' are also treated as false values.
+	 * This allows --debug=no and --debug=false to mean the same as
+	 * --no-debug.
+	 *
+	 * @param {Boolean} a boolean, or a string naming a boolean value.
+	 */
+	booleanOption: function ( val ) {
+		if ( !val ) { return false; }
+		if ( (typeof val) === 'string' &&
+			 /^(no|false)$/i.test(val)) {
+			return false;
+		}
+		return true;
+	},
+
+	/**
+	 * @method
+	 *
+	 * Set the color flags, based on an options object.
+	 *
+	 * @param {Options} options The options object to use for setting
+	 *        the mode of the 'color' package.
+	 */
+	setColorFlags: function(options) {
+		var colors = require('colors');
+		if( options.color === 'auto' ) {
+			if (!process.stdout.isTTY) {
+				colors.mode = 'none';
+			}
+		} else if( !Util.booleanOption( options.color ) ) {
+			colors.mode = 'none';
+		}
+	},
+
+	/**
+	 * @method
+	 *
+	 * Update only those properties that are undefined or null
+	 * $.extend updates properties that are falsy (which means false gets updated as well)
+	 *
+	 * @param {Object} tgt The object to modify.
+	 * @param {Object} subject The object to extend tgt with. Add more arguments to the function call to chain more extensions.
+	 * @returns {Object} The modified object.
+	 */
 	extendProps: function() {
 		function internalExtend(target, obj) {
 			var allKeys = [].concat(Object.keys(target),Object.keys(obj));
@@ -34,144 +121,181 @@ var HTML5 = require( 'html5' ).HTML5,
 	},
 
 	/**
-	 * Determine if a tag name is block-level or not
-	 *
-	 * @static
-	 * @method
-	 * @param {String} name: Lower-case tag name
-	 * @returns {Boolean}: True if tag is block-level, false otherwise.
-	 */
+	* Determine if a tag is block-level or not
+	*/
 	isBlockTag: function ( name ) {
-		switch ( name ) {
-			case 'div':
-			case 'p':
-			// tables
-			case 'table':
-			case 'tbody':
-			case 'thead':
-			case 'tfoot':
-			case 'caption':
-			case 'th':
-			case 'tr':
-			case 'td':
-			// lists
-			case 'ul':
-			case 'ol':
-			case 'li':
-			case 'dl':
-			case 'dt':
-			case 'dd':
-			// HTML5 heading content
-			case 'h1':
-			case 'h2':
-			case 'h3':
-			case 'h4':
-			case 'h5':
-			case 'h6':
-			case 'hgroup':
-			// HTML5 sectioning content
-			case 'article':
-			case 'aside':
-			case 'body':
-			case 'nav':
-			case 'section':
-			case 'footer':
-			case 'header':
-			case 'figure':
-			case 'figcaption':
-			case 'fieldset':
-			case 'details':
-			case 'blockquote':
-			// other
-			case 'hr':
-			case 'button':
-			case 'canvas':
-			case 'center':
-			case 'col':
-			case 'colgroup':
-			case 'embed':
-			case 'map':
-			case 'object':
-			case 'pre':
-			case 'progress':
-			case 'video':
-				return true;
-			default:
-				return false;
-		}
-	},
-
-	// In the PHP parser, these block tags open block-tag scope
-	// See doBlockLevels in the PHP parser (includes/parser/Parser.php)
-	tagOpensBlockScope: function(name) {
-		switch ( name ) {
-			case 'p':
-			case 'table':
-			case 'tr':
-			case 'ul':
-			case 'ol':
-			case 'li':
-			case 'dl':
-			case 'h1':
-			case 'h2':
-			case 'h3':
-			case 'h4':
-			case 'h5':
-			case 'h6':
-			case 'blockquote':
-			case 'pre':
-				return true;
-			default:
-				return false;
-		}
-	},
-
-	// In the PHP parser, these block tags close block-tag scope
-	// See doBlockLevels in the PHP parser (includes/parser/Parser.php)
-	tagClosesBlockScope: function(name) {
-		return name === 'td' || name === 'th';
-	},
-
-	// See http://www.whatwg.org/specs/web-apps/current-work/#void-elements
-	voidElements: { area: 1, base: 1, br: 1, col: 1, command: 1, embed: 1, hr: 1, img: 1,
-		input: 1, keygen: 1, link: 1, meta: 1, param: 1, source: 1, track: 1, wbr: 1 },
-
-	/*
-	 * Determine if the tag is an empty HTML tag
-	 */
-	isVoidElement: function ( name ) {
-		return this.voidElements[name] || false;
+		return name.toUpperCase() in Consts.HTML.BlockTags;
 	},
 
 	/**
-	 * Determine if a token is block-level or not
-	 *
-	 * @static
-	 * @method
-	 * @param {Object} token: The token to check
-	 * @returns {Boolean}: True if token is block-level, false otherwise.
+	 * In the PHP parser, these block tags open block-tag scope
+	 * See doBlockLevels in the PHP parser (includes/parser/Parser.php)
 	 */
+	tagOpensBlockScope: function(name) {
+		return name.toUpperCase() in Consts.BlockScopeOpenTags;
+	},
+
+	/**
+	 * In the PHP parser, these block tags close block-tag scope
+	 * See doBlockLevels in the PHP parser (includes/parser/Parser.php)
+	 */
+	tagClosesBlockScope: function(name) {
+		return name.toUpperCase() in Consts.BlockScopeCloseTags;
+	},
+
+	/**
+	 *Determine if the named tag is void (can not have content).
+	 */
+	isVoidElement: function ( name ) {
+		return name.toUpperCase() in Consts.HTML.VoidTags;
+	},
+
+	/**
+	* Determine if a token is block-level or not
+	*/
 	isBlockToken: function ( token ) {
-		if ( token.constructor === TagTk ||
-				token.constructor === EndTagTk ||
-				token.constructor === SelfclosingTagTk ) {
+		if ( token.constructor === pd.TagTk ||
+		     token.constructor === pd.EndTagTk ||
+		     token.constructor === pd.SelfclosingTagTk ) {
 			return Util.isBlockTag( token.name );
 		} else {
 			return false;
 		}
 	},
 
+	isTemplateToken: function(token) {
+		return token && token.constructor === pd.SelfclosingTagTk && token.name === 'template';
+	},
+
+	isTableTag: function(token) {
+		var tc = token.constructor;
+		return (tc === pd.TagTk || tc === pd.EndTagTk) &&
+			token.name.toUpperCase() in Consts.HTML.TableTags;
+	},
+
+	isSolTransparentLinkTag: function(token) {
+		var tc = token.constructor;
+		return (tc === pd.SelfclosingTagTk || tc === pd.TagTk || tc === pd.EndTagTk) &&
+			token.name === 'link' &&
+			/mw:(WikiLink\/Category|PageProp\/redirect)/.test(token.getAttribute('rel'));
+	},
+
 	isSolTransparent: function(token) {
 		var tc = token.constructor;
 		if (tc === String) {
-			if (token.match(/[^\s]/)) {
-				return false;
-			}
-		} else if (tc !== CommentTk && (tc !== SelfclosingTagTk || token.name !== 'meta')) {
+			return token.match(/^\s*$/);
+		} else if (this.isSolTransparentLinkTag(token)) {
+			return true;
+		} else if (tc !== pd.CommentTk &&
+		           (tc !== pd.SelfclosingTagTk || token.name !== 'meta')) {
 			return false;
 		}
 
-		return true;
+		// BUG 47854: Treat all mw:Extension/* tokens as non-SOL.
+		if (token.name === 'meta' && /\bmw:Extension\//.test(token.getAttribute('typeof'))) {
+			return false;
+		} else {
+			return true;
+		}
+	},
+
+	/*
+	 * Transform "\n" and "\r\n" in the input string to NlTk tokens
+	 */
+	newlinesToNlTks: function(str, tsr0) {
+		var toks = str.split(/\n|\r\n/),
+			ret = [],
+			tsr = tsr0;
+
+		// Add one NlTk between each pair, hence toks.length-1
+		for (var i = 0, n = toks.length-1; i < n; i++) {
+			ret.push(toks[i]);
+			var nlTk = new pd.NlTk();
+			if (tsr !== undefined) {
+				tsr += toks[i].length;
+				nlTk.dataAttribs = { tsr: [tsr, tsr+1] };
+			}
+			ret.push(nlTk);
+		}
+		ret.push(toks[i]);
+
+		return ret;
+	},
+
+	shiftTokenTSR: function(tokens, offset, clearIfUnknownOffset) {
+		// Bail early if we can
+		if (offset === 0) {
+			return;
+		}
+
+		// offset should either be a valid number or null
+		if (offset === undefined) {
+			if (clearIfUnknownOffset) {
+				offset = null;
+			} else {
+				return;
+			}
+		}
+
+		// update/clear tsr
+		for (var i = 0, n = tokens.length; i < n; i++) {
+			var t = tokens[i];
+			switch (t.constructor) {
+				case pd.TagTk:
+				case pd.SelfclosingTagTk:
+				case pd.NlTk:
+				case pd.CommentTk:
+				case pd.EndTagTk:
+					var da = tokens[i].dataAttribs;
+					var tsr = da.tsr;
+					if (tsr) {
+						if (offset !== null) {
+							da.tsr = [tsr[0] + offset, tsr[1] + offset];
+						} else {
+							da.tsr = null;
+						}
+					}
+
+					// SSS FIXME: offset will always be available in
+					// chunky-tokenizer mode in which case we wont have
+					// buggy offsets below.  The null scenario is only
+					// for when the token-stream-patcher attempts to
+					// reparse a string -- it is likely to only patch up
+					// small string fragments and the complicated use cases
+					// below should not materialize.
+
+					// target offset
+					if (offset && da.targetOff) {
+						da.targetOff += offset;
+					}
+
+					//  Process attributes
+					if (t.attribs) {
+						for (var j = 0, m = t.attribs.length; j < m; j++) {
+							var a = t.attribs[j];
+							if (a.k.constructor === Array) {
+								this.shiftTokenTSR(a.k, offset, clearIfUnknownOffset);
+							}
+							if (a.v.constructor === Array) {
+								this.shiftTokenTSR(a.v, offset, clearIfUnknownOffset);
+							}
+
+							// src offsets used to set mw:TemplateParams
+							if (offset === null) {
+								a.srcOffsets = null;
+							} else if (a.srcOffsets) {
+								for (var k = 0; k < a.srcOffsets.length; k++) {
+									a.srcOffsets[k] += offset;
+								}
+							}
+						}
+					}
+					break;
+
+				default:
+					break;
+			}
+		}
 	},
 
 	toStringTokens: function(tokens, indent) {
@@ -203,16 +327,113 @@ var HTML5 = require( 'html5' ).HTML5,
 			if ( token === undefined ) {
 				console.warn( 'Util.tokensToString, invalid token: ' +
 								token, ' tokens:', tokens);
+				console.trace();
 			} else if ( token.constructor === String ) {
 				out.push( token );
-			} else if ( token.constructor === CommentTk || token.constructor === NlTk ) {
+			} else if ( token.constructor === pd.CommentTk ||
+			            token.constructor === pd.NlTk ) {
 				// strip comments and newlines
+				/* jshint noempty: false */
 			} else if ( strict ) {
 				// If strict, return accumulated string on encountering first non-text token
 				return [out.join(''), tokens.slice( i )];
 			}
 		}
 		return out.join('');
+	},
+
+	flattenAndAppendToks: function(array, prefix, t) {
+		if (t.constructor === pd.ParserValue) {
+			// The check above will explode for undefined or null, but that is
+			// fine. Fail early and loudly!
+			throw new TypeError("Got ParserValue in flattenAndAppendToks!");
+		} else if (t.constructor === Array || t.constructor === String) {
+			if (t.length > 0) {
+				if (prefix) {
+					array.push(prefix);
+				}
+				array = array.concat(t);
+			}
+		} else {
+			if (prefix) {
+				array.push(prefix);
+			}
+			array.push(t);
+		}
+
+		return array;
+	},
+
+	/**
+	 * Expand all ParserValue values in the passed-in KV pairs, and call the
+	 * supplied callback with the new KV pairs.
+	 */
+	expandParserValueValues: function(kvs, cb, wrapTemplates) {
+		var v,
+		reassembleKV = function( kv, cb2, v )  {
+			var newKV = Util.clone(kv);
+			newKV.v = v;
+			cb2(null, newKV);
+		};
+
+
+		async.map(
+				kvs,
+				function ( kv, cb1 ) {
+					v = kv.v;
+					if ( v.constructor === pd.ParserValue ) {
+						v.get({
+							type: 'tokens/x-mediawiki/expanded',
+							cb: reassembleKV.bind(null, kv, cb1),
+							wrapTemplates: wrapTemplates
+						});
+					} else {
+						cb1 ( null, kv );
+					}
+				},
+				function ( err, expandedAttrs ) {
+					if ( err ) {
+						throw( err );
+					}
+					cb(expandedAttrs);
+				}
+		);
+	},
+
+	/**
+	 * Determine whether two objects are identical, recursively.
+	 */
+	deepEquals: function ( a, b ) {
+		var i;
+		if ( a === b ) {
+			// If only it were that simple.
+			return true;
+		}
+
+		if ( a === undefined || b === undefined ||
+				a === null || b === null ) {
+			return false;
+		}
+
+		if ( a.constructor !== b.constructor ) {
+			return false;
+		}
+
+		if ( a instanceof Object ) {
+			for ( i in a ) {
+				if ( !this.deepEquals( a[i], b[i] ) ) {
+					return false;
+				}
+			}
+			for ( i in b ) {
+				if ( a[i] === undefined ) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		return false;
 	},
 
 	// deep clones by default.
@@ -237,34 +458,6 @@ var HTML5 = require( 'html5' ).HTML5,
 		}
 	},
 
-	// Deep-freeze an object
-	// See
-	// https://developer.mozilla.org/en-US/docs/JavaScript/Reference/Global_Objects/Object/freeze
-	deepFreeze: function (o) {
-		if ( o === undefined ) {
-			return;
-		} else if ( ! (o instanceof Object) ) {
-			//console.log( o );
-			//console.trace();
-			return;
-		} else if ( Object.isFrozen(o) ) {
-			return;
-		}
-
-		Object.freeze(o); // First freeze the object.
-		for (var propKey in o) {
-			var prop = o[propKey];
-			if (!o.hasOwnProperty(propKey) || !(prop instanceof Object) || Object.isFrozen(prop)) {
-				// If the object is on the prototype, not an object, or is already frozen,
-				// skip it. Note that this might leave an unfrozen reference somewhere in the
-				// object if there is an already frozen object containing an unfrozen object.
-				continue;
-			}
-
-			this.deepFreeze(prop); // Recursively call deepFreeze.
-		}
-	},
-
 	// 'cb' can only be called once after "everything" is done.
 	// But, we need something that can be used in async context where it is
 	// called repeatedly till we are done.
@@ -285,7 +478,7 @@ var HTML5 = require( 'html5' ).HTML5,
 			// * Accumulate async call results in an array
 			//   till we get the signal that we are all done
 			// * Once we are done, pass everything to the target cb.
-			if (!res.switchToAsync) {
+			if (res.async !== true) {
 				// There are 3 kinds of callbacks:
 				// 1. cb({tokens: .. })
 				// 2. cb({}) ==> toks can be undefined
@@ -368,9 +561,9 @@ var HTML5 = require( 'html5' ).HTML5,
 	KVtoHash: function ( kvs ) {
 		if ( ! kvs ) {
 			console.warn( "Invalid kvs!: " + JSON.stringify( kvs, null, 2 ) );
-			return {};
+			return Object.create(null);
 		}
-		var res = {};
+		var res = Object.create(null);
 		for ( var i = 0, l = kvs.length; i < l; i++ ) {
 			var kv = kvs[i],
 				key = this.tokensToString( kv.k ).trim();
@@ -405,7 +598,7 @@ var HTML5 = require( 'html5' ).HTML5,
 		var leadingToks = [];
 		for ( i = 0; i < n; i++ ) {
 			token = tokens[i];
-			if (token.constructor === NlTk) {
+			if (token.constructor === pd.NlTk) {
 				leadingToks.push('');
 			} else if ( token.constructor === String ) {
 				leadingToks.push(token.replace( /^\s+/, '' ));
@@ -426,7 +619,7 @@ var HTML5 = require( 'html5' ).HTML5,
 		var trailingToks = [];
 		for ( i = n - 1; i >= 0; i-- ) {
 			token = tokens[i];
-			if (token.constructor === NlTk) {
+			if (token.constructor === pd.NlTk) {
 				trailingToks.push(''); // replace newline with empty
 			} else if ( token.constructor === String ) {
 				trailingToks.push(token.replace( /\s+$/, '' ));
@@ -457,14 +650,17 @@ var HTML5 = require( 'html5' ).HTML5,
 		}
 		// Strip 'end' tokens and trailing newlines
 		var l = tokens[tokens.length - 1];
-		if ( l.constructor === EOFTk || l.constructor === NlTk ||
-				( l.constructor === String && l.match( /^\s+$/ ) ) ) {
+		if ( l &&
+		     ( l.constructor === pd.EOFTk ||
+		       l.constructor === pd.NlTk ||
+				( l.constructor === String && l.match( /^\s+$/ ) ) ) ) {
 			var origTokens = tokens;
 			tokens = origTokens.slice();
 			tokens.rank = origTokens.rank;
 			while ( tokens.length &&
-					((	l.constructor === EOFTk  || l.constructor === NlTk )  ||
-				( l.constructor === String && l.match( /^\s+$/ ) ) ) )
+			        (( l.constructor === pd.EOFTk  ||
+			           l.constructor === pd.NlTk )  ||
+			         ( l.constructor === String && l.match( /^\s+$/ ) ) ) )
 			{
 				// this.dp( 'stripping end or whitespace tokens' );
 				tokens.pop();
@@ -499,10 +695,10 @@ var HTML5 = require( 'html5' ).HTML5,
 	},
 
 	decodeURI: function ( s ) {
-		return s.replace( /%[0-9a-f][0-9a-f]/g, function( m ) {
+		return s.replace( /(%[0-9a-fA-F][0-9a-fA-F])+/g, function( m ) {
 			try {
 				// JS library function
-				return decodeURI( m );
+				return decodeURIComponent( m );
 			} catch ( e ) {
 				return m;
 			}
@@ -567,12 +763,27 @@ var HTML5 = require( 'html5' ).HTML5,
 		}
 	},
 
-	arrayToHash: function(a) {
-		var h = {};
-		for (var i = 0, n = a.length; i < n; i++) {
-			h[a[i]] = 1;
-		}
-		return h;
+    // SSS FIXME: This code is copied from the WTS.
+    // Given the ongoing refactoring, I figured it is good to have a copy here
+    // and de-duplicate code once the refactoring is complete and see if this
+    // code survives there.
+    charSequence: function(prefix, c, numChars) {
+        if (numChars && numChars > 0) {
+            var buf = [prefix];
+            for (var i = 0; i < numChars; i++) {
+                buf.push(c);
+            }
+            return buf.join('');
+        } else {
+            return prefix;
+        }
+    },
+
+	extractExtBody: function(extName, extTagSrc) {
+		var re = "<" + extName + "[^>]*/?>([\\s\\S]*)";
+		return extTagSrc.replace(new RegExp(re, "mi"), function() {
+			return arguments[1].replace(new RegExp("</" + extName + ">", "mi"), "");
+		});
 	},
 
 	// Returns the utf8 encoding of the code point
@@ -588,36 +799,29 @@ var HTML5 = require( 'html5' ).HTML5,
 			(cp >=    0x20 && cp <=   0xd7ff) ||
 			(cp >=  0xe000 && cp <=   0xfffd) ||
 			(cp >= 0x10000 && cp <= 0x10ffff);
-	}
-};
+	},
 
-/**
- * Utility function for stripping useless paragraphs from the beginning of a list item,
- * because they get appended by VisualEditor sometimes.
- */
-Util.stripFirstParagraph = function ( node ) {
-	var thisnode, hasAttrs, dataParsoid, attrs, exemptAttrs = 0, haveGone = false;
-	for ( var i = 0; i < node.childNodes.length; i++ ) {
-		thisnode = node.childNodes[i];
-		exemptAttrs += Util.getJSONAttribute( thisnode, 'data-ve-changed' ) ? 1 : 0;
-		dataParsoid = Util.getJSONAttribute( thisnode, 'data-parsoid' );
-		exemptAttrs += dataParsoid ? 1 : 0;
-		attrs = thisnode.attributes;
-		hasAttrs = ( attrs && attrs.length && attrs.length - exemptAttrs ) > 0;
-		if ( ( node.tagName || '' ).toLowerCase() === 'li' && i < 1 && !hasAttrs &&
-				( !dataParsoid || !dataParsoid.stx || dataParsoid.stx !== 'html' ) &&
-				( thisnode.tagName || '' ).toLowerCase() === 'p' ) {
-			for ( var j = 0; j < thisnode.childNodes.length; j++ ) {
-				node.insertBefore( thisnode.childNodes[j].cloneNode(), thisnode );
+	debug_pp: function() {
+		var out = [arguments[0]];
+		for ( var i = 2; i < arguments.length; i++) {
+			var a = arguments[i];
+			if (a === null) {
+				out.push('null');
+			} else if (a === undefined) {
+				out.push('undefined');
+			} else if (a.constructor === Boolean) {
+				out.push(a ? '1' : '0');
+			} else if (a.constructor !== String || a.match(/\n|^\s+$/)) {
+				out.push(JSON.stringify(a));
+			} else {
+				out.push(a);
 			}
-			node.removeChild( thisnode );
-			i--;
-		} else {
-			Util.stripFirstParagraph( thisnode );
 		}
+		console.error(out.join(arguments[1]));
 	}
 };
 
+// FIXME: There is also a DOMUtils.getJSONAttribute. Consolidate
 Util.getJSONAttribute = function ( node, attr, fallback ) {
     fallback = fallback || null;
     var atext;
@@ -633,98 +837,22 @@ Util.getJSONAttribute = function ( node, attr, fallback ) {
     }
 };
 
-/* ----------------------------------------------------------
- * This method does two different things:
- *
- * 1. Strips all meta tags
- *    (FIXME: should I be selective and only strip mw:Object/* tags?)
- * 2. In wrap-template mode, it identifies the meta-object type
- *    and returns it.
- * ---------------------------------------------------------- */
-Util.stripMetaTags = function ( tokens, wrapTemplates ) {
-	var isPushed, buf = [],
-		wikitext = [],
-		metaObjTypes = [],
-		inTemplate = false;
-
-	for (var i = 0, l = tokens.length; i < l; i++) {
-		var token = tokens[i];
-		isPushed = false;
-		if ([TagTk, SelfclosingTagTk].indexOf(token.constructor) !== -1) {
-			// Strip all meta tags.
-			// SSS FIXME: should I be selective and only strip mw:Object/* tags?
-			if (wrapTemplates) {
-				// If we are in wrap-template mode, extract info from the meta-tag
-				var t = token.getAttribute("typeof");
-				var typeMatch = t && t.match(/(mw:Object(?:\/.*)?$)/);
-				if (typeMatch) {
-					inTemplate = !(typeMatch[1].match(/\/End$/));
-					if (inTemplate) {
-						metaObjTypes.push(typeMatch[1]);
-						wikitext.push(token.dataAttribs.src);
-					}
-				} else {
-					isPushed = true;
-					buf.push(token);
-				}
-			}
-
-			if (!isPushed && token.name !== "meta") {
-				// Dont strip token if it is not a meta-tag
-				buf.push(token);
-			}
-		} else {
-			// Assumes that non-template tokens are always text.
-			// In turn, based on assumption that HTML attribute values
-			// cannot contain any HTML (SSS FIXME: Isn't this true?)
-			if (!inTemplate) {
-				wikitext.push(token);
-			}
-			buf.push(token);
-		}
-	}
-
-	return {
-		// SSS FIXME: Assumes that either the attr. has only 1 expansion
-		// OR all expansions are of the same type.
-		// Consider the attr composed of pieces: s1, s2, s3
-		// - s1 can be generated by a template
-		// - s2 can be plain text
-		// - s3 can be generated by an extension.
-		// While that might be considered utter madness, there is nothing in
-		// the spec right now that prevents this.  In any case, not sure
-		// we do require all expandable types to be tracked.
-		metaObjType: metaObjTypes[0],
-		wikitext: Util.tokensToString(wikitext),
-		value: buf
-	};
-};
-
-Util.makeTplAffectedMeta = function ( contentType, key, val ) {
-	// SSS FIXME: Assumes that all expanded attrs. have the same expandable type
-	// - attr1 can be expanded by a template
-	// - attr2 can be expanded by an extension
-	// While that might be considered madness, there is nothing in the spec right
-	// not that prevents this.  In any case, not sure we do require all
-	// expandable types to be tracked.
-
-	// <meta about="#mwt1" property="mw:objectAttr#href" data-parsoid="...">
-	// about will be filled out in the end
-	return new SelfclosingTagTk( 'meta',
-		[new KV( "property", "mw:" + contentType + "#" + key )],
-		{ src: val.wikitext });
-};
-
 // Separate closure for normalize functions that
 // use a singleton html parser
 ( function ( Util ) {
 
-var htmlparser = new HTML5.Parser(),
 
-normalizeNewlines = function ( source ) {
+/**
+ * Normalize a bit of source by stripping out unnecessary newlines.
+ *
+ * @method
+ * @param {string} source
+ * @returns {string}
+ */
+var normalizeNewlines = function ( source ) {
 	return source
 				// strip comments first
-				.replace(/<!--(?:[^-]+|-(?!->))*-->/gm, '')
+				.replace(/<!--(?:[^\-]|-(?!->))*-->/gm, '')
 
 				// preserve a space for non-inter-tag-whitespace
 				// non-tag content followed by non-tag content
@@ -732,100 +860,238 @@ normalizeNewlines = function ( source ) {
 
 				// and eat all remaining newlines
 				.replace(/[\r\n]/g, '');
-},
+};
 
 /**
+ * @method normalizeOut
+ *
  * Specialized normalization of the wiki parser output, mostly to ignore a few
- * known-ok differences.
+ * known-ok differences.  If parsoidOnly is true-ish, then we allow more
+ * markup through (like property and typeof attributes), for better
+ * checking of parsoid-only test cases.
+ *
+ * @param {string} out
+ * @param {bool} parsoidOnly
+ * @returns {string}
  */
-normalizeOut = function ( out ) {
+var normalizeOut = function ( out, parsoidOnly ) {
 	// TODO: Do not strip newlines in pre and nowiki blocks!
+	// NOTE that we use a slightly restricted regexp for "attribute"
+	//  which works for the output of DOM serialization.  For example,
+	//  we know that attribute values will be surrounded with double quotes,
+	//  not unquoted or quoted with single quotes.  The serialization
+	//  algorithm is given by:
+	//  http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
+	if (!/[^<]*(<\w+(\s+[^\0-\cZ\s"'>\/=]+(="[^"]*")?)*\/?>[^<]*)*/.test(out)) {
+		throw new Error("normalizeOut input is not in standard serialized form");
+	}
 	out = normalizeNewlines( out );
-	return out
-		.replace(/<span typeof="mw:(?:(?:Placeholder|Nowiki|Object\/Template|Entity))"[^>]*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1')
-		.replace(/ (data-parsoid|typeof|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content)="[^">]*"/g, '')
+	if ( !parsoidOnly ) {
+		// ignore troublesome attributes
+		out = out.
+			// remove <span typeof="....">....</span>
+			replace(/<span(?:[^>]*) typeof="mw:(?:Placeholder|Nowiki|Transclusion|Entity)"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
+			replace(/ (data-mw|data-parsoid|typeof|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content|title|class)="[^\"]*"/g, '');
+	} else {
+		out = out.
+			// remove <span typeof="mw:Placeholder">....</span>
+			replace(/<span(?: [^>]+)* typeof="mw:Placeholder"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
+			// unnecessary attributes, we don't need to check these
+			// style is in there because we should only check classes.
+			replace(/ (data-mw|data-parsoid|prefix|about|rev|datatype|inlist|vocab|content|style)="[^\"]*"/g, '').
+			replace(/<\/?(?:meta|link)(?: [^\0-\cZ\s"'>\/=]+(?:="[^"]*")?)*\/?>/g, '');
+	}
+	return out.
+		// replace mwt ids
+		replace(/ id="mwt\d+"/, '').
 		//.replace(/<!--.*?-->\n?/gm, '')
-		.replace(/<\/?(?:meta|link) [^>]*>/g, '')
-		.replace(/<span[^>]+about="[^]+>/g, '')
-		.replace(/<span><\/span>/g, '')
-		.replace(/href="(?:\.?\.\/)+/g, 'href="')
+		replace(/<span[^>]+about="[^"]*"[^>]*>/g, '').
+		replace(/<span><\/span>/g, '').
+		replace(/(href=")(?:\.?\.\/)+/g, '$1').
+		// replace unnecessary URL escaping
+		replace(/ href="[^"]*"/g, Util.decodeURI).
 		// strip thumbnail size prefixes
-		.replace(/(src="[^"]*?)\/thumb(\/[0-9a-f]\/[0-9a-f]{2}\/[^\/]+)\/[0-9]+px-[^"\/]+(?=")/g, '$1$2')
-		.replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
-},
+		replace(/(src="[^"]*?)\/thumb(\/[0-9a-f]\/[0-9a-f]{2}\/[^\/]+)\/[0-9]+px-[^"\/]+(?=")/g, '$1$2').
+		replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
+};
 
 /**
+ * @method normalizeHTML
+ *
  * Normalize the expected parser output by parsing it using a HTML5 parser and
  * re-serializing it to HTML. Ideally, the parser would normalize inter-tag
  * whitespace for us. For now, we fake that by simply stripping all newlines.
  *
- * @arg source {string} The source to normalize.
+ * @param source {string}
+ * @return {string}
  */
-normalizeHTML = function ( source ) {
+var normalizeHTML = function ( source ) {
 	// TODO: Do not strip newlines in pre and nowiki blocks!
 	source = normalizeNewlines( source );
 	try {
-		htmlparser.parse('<body>' + source + '</body>');
-		return htmlparser.document.childNodes[0].childNodes[1]
+		var doc = this.parseHTML( source );
+		return doc.body
 			.innerHTML
 			// a few things we ignore for now..
 			//.replace(/\/wiki\/Main_Page/g, 'Main Page')
 			// do not expect a toc for now
-			.replace(/<table[^>]+?id="toc"[^>]*>.+?<\/table>/mg, '')
+			.replace(/<div[^>]+?id="toc"[^>]*><div id="toctitle">.+?<\/div>.+?<\/div>/mg, '')
 			// do not expect section editing for now
-			.replace(/(<span class="editsection">\[.*?<\/span> *)?<span[^>]+class="mw-headline"[^>]*>(.*?)<\/span>/g, '$2')
+			.replace(/<span[^>]+class="mw-headline"[^>]*>(.*?)<\/span> *(<span class="mw-editsection"><span class="mw-editsection-bracket">\[<\/span>.*?<span class="mw-editsection-bracket">\]<\/span><\/span>)?/g, '$1')
+			// remove empty span tags
+			.replace(/<span><\/span>/g, '')
 			// general class and titles, typically on links
-			.replace(/(title|class|rel)="[^"]+"/g, '')
+			.replace(/ (title|class|rel|about|typeof)="[^"]*"/g, '')
 			// strip red link markup, we do not check if a page exists yet
 			.replace(/\/index.php\?title=([^']+?)&amp;action=edit&amp;redlink=1/g, '/wiki/$1')
 			// the expected html has some extra space in tags, strip it
 			.replace(/<a +href/g, '<a href')
 			.replace(/href="\/wiki\//g, 'href="')
 			.replace(/" +>/g, '">')
+			// parsoid always add a page name to lonely fragments
+			.replace(/href="#/g, 'href="Main Page#')
+			// replace unnecessary URL escaping
+			.replace(/ href="[^"]*"/g, Util.decodeURI)
+			// strip empty spans
+			.replace(/<span><\/span>/g, '')
 			.replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
 	} catch(e) {
-        console.log("normalizeHTML failed on" +
-				source + " with the following error: " + e);
+		console.log("normalizeHTML failed on" +
+		            source + " with the following error: " + e);
 		console.trace();
 		return source;
 	}
 },
 
+/**
+ * @method formatHTML
+ *
+ * Insert newlines before some block-level start tags.
+ *
+ * @param {string} source
+ * @returns {string}
+ */
 formatHTML = function ( source ) {
-	// Quick hack to insert newlines before some block level start tags
 	return source.replace(
 		/(?!^)<((div|dd|dt|li|p|table|tr|td|tbody|dl|ol|ul|h1|h2|h3|h4|h5|h6)[^>]*)>/g, '\n<$1>');
 },
 
 /**
+ * @method parseHTML
+ *
  * Parse HTML, return the tree.
  *
- * @arg html {string} The HTML to parse.
- * @returns {object} The HTML DOM tree.
+ * @param {string} html
+ * @returns {Node}
  */
 parseHTML = function ( html ) {
-	htmlparser.parse( html );
-	return htmlparser.tree;
+	if(! html.match(/^<(?:!doctype|html|body)/i)) {
+		// Make sure that we parse fragments in the body. Otherwise comments,
+		// link and meta tags end up outside the html element or in the head
+		// element.
+		html = '<body>' + html;
+	}
+	return domino.createDocument(html);
 },
 
 /**
+ * @method compressHTML
+ *
+ * Compress an HTML string by applying some smart quoting
+ *
+ * @param {string} html
+ * @returns {string}
+ */
+compressHTML = function(html) {
+	// now compress our output (and make it more readable) by using
+	// "smart quoting" of attribute values -- using single-quotes
+	// where the contents have a lot of double quotes.
+	// since the output of outerHTML is specified strictly, we know
+	// this regexp is safe. See:
+	// http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html
+	// http://www.whatwg.org/specs/web-apps/current-work/multipage/syntax.html
+	var smart_quote = function(match, name, equals, value) {
+		if (!equals) { return match; }
+		var decoded = entities.decodeHTML5(value);
+		// try re-encoding with single-quotes escaped
+		var encoded = decoded.replace(/[&'\u00A0]/g, function(c) {
+			switch(c) {
+			case '&': return '&amp;';
+			case "'": return '&#39;';
+			case '\u00A0': return '&nbsp;';
+			}
+		});
+		if (encoded.length >= value.length) { return match; /* no change */ }
+		return ' '+name+"='"+encoded+"'";
+	};
+	var process_attr_list = function(match, tag, attrs) {
+		attrs = attrs.replace(/ ([^\0-\cZ\s"'>\/=]+)(="([^"]*)")?/g,
+		                      smart_quote);
+		return tag + attrs + '>';
+	};
+	return html.replace(/(<\w+)((?: [^\0-\cZ\s"'>\/=]+(?:="[^"]*")?)+)>/g,
+	                    process_attr_list);
+},
+
+/**
+ * @method serializeNode
+ *
+ * Serialize a HTML document.
+ * The output is identical to standard DOM serialization, as given by
+ * http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
+ * except that we may quote attributes with single quotes, *only* where that would
+ * result in more compact output than the standard double-quoted serialization.
+ * Single-quoted attribute values have &amp; &#39 and &nbsp; escaped.
+ *
+ * @param {Node} doc
+ * @returns {string}
+ */
+serializeNode = function (doc, dontCompress) {
+	// use domino's outerHTML, as specified by
+	// http://domparsing.spec.whatwg.org/#outerhtml
+	var html = doc.outerHTML;
+	// technically, dom doesn't define outerHTML on a Document; that's
+	// just a convenience API defined by domino.  We can handle a
+	// more-standard DOM implementation, too.
+	if (doc.nodeName==='#document' && !html) {
+		html = doc.documentElement.outerHTML;
+	}
+	// ensure there's a doctype for documents
+	if (html &&
+	    (doc.nodeName === '#document' || /^html$/i.test(doc.nodeName)) &&
+	    ! /^\s*<!doctype/i.test(html)) {
+		html = '<!DOCTYPE html>\n' + html;
+	}
+	if (!html) {
+		// fall back to definition of outerHTML, for comments, etc:
+		// "return the result of running the HTML fragment
+		// serialization algorithm on a fictional node whose only child is
+		// the context object"
+		var fictional = doc.ownerDocument.createElement('p');
+		fictional.appendChild(doc.cloneNode());
+		html = fictional.innerHTML;
+	}
+
+	return dontCompress ? html : compressHTML(html);
+},
+
+/**
+ * @method encodeXml
+ *
  * Little helper function for encoding XML entities
+ *
+ * @param {string} string
+ * @returns {string}
  */
 encodeXml = function ( string ) {
-	var xml_special_to_escaped_one_map = {
-		'&': '&amp;',
-		'"': '&quot;',
-		'<': '&lt;',
-		'>': '&gt;'
-	};
-
-	return string.replace( /([\&"<>])/g, function ( str, item ) {
-		return xml_special_to_escaped_one_map[item];
-	} );
+	return entities.encodeXML(string);
 };
 
+// FIXME gwicke: define this directly
 Util.encodeXml = encodeXml;
 Util.parseHTML = parseHTML;
+Util.compressHTML = compressHTML;
+Util.serializeNode = serializeNode;
 Util.normalizeHTML = normalizeHTML;
 Util.normalizeOut = normalizeOut;
 Util.formatHTML = formatHTML;
@@ -892,6 +1158,26 @@ Util.convertDiffToOffsetPairs = convertDiffToOffsetPairs;
 
 }( Util ) );
 
+// Variant of diff with some extra context
+Util.contextDiff = function(a, b, color, onlyReportChanges, useLines) {
+	var diff = jsDiff.diffLines( a, b ),
+		offsetPairs = this.convertDiffToOffsetPairs( diff ),
+		results = [];
+	offsetPairs.map(function(pair) {
+		var context = 5,
+			asource = a.substring(pair[0].start - context, pair[0].end + context),
+			bsource = b.substring(pair[1].start - context, pair[1].end + context);
+		results.push('++++++\n' + JSON.stringify(asource));
+		results.push('------\n' + JSON.stringify(bsource));
+		//results.push('======\n' + Util.diff(a, b, color, onlyReportChanges, useLines));
+	});
+	if ( !onlyReportChanges || diff.length > 0 ) {
+		return results.join('\n');
+	} else {
+		return '';
+	}
+};
+
 var diff = function ( a, b, color, onlyReportChanges, useLines ) {
 	var thediff, patch, diffs = 0;
 	if ( color ) {
@@ -902,12 +1188,12 @@ var diff = function ( a, b, color, onlyReportChanges, useLines ) {
 			if ( change.added ) {
 				diffs++;
 				return change.value.split( '\n' ).map( function ( line ) {
-					return line.green;
+					return line.green + '';//add '' to workaround color bug
 				} ).join( '\n' );
 			} else if ( change.removed ) {
 				diffs++;
 				return change.value.split( '\n' ).map( function ( line ) {
-					return line.red;
+					return line.red + '';//add '' to workaround color bug
 				} ).join( '\n' );
 			} else {
 				return change.value;
@@ -932,68 +1218,163 @@ var diff = function ( a, b, color, onlyReportChanges, useLines ) {
 };
 Util.diff = diff;
 
-var getParser = function ( env, type ) {
+// XXX gwicke: move to a Parser object?
+Util.getParserPipeline = function ( env, type ) {
 	var ParserPipelineFactory = require( './mediawiki.parser.js' ).ParserPipelineFactory;
-	return ( new ParserPipelineFactory( env || getParserEnv() ) ).makePipeline( type );
-},
+	return ( new ParserPipelineFactory( env ) ).makePipeline( type );
+};
 
-parse = function ( env, cb, err, src ) {
+// XXX gwicke: move to a Parser object?
+Util.parse = function ( env, cb, err, src, expansions ) {
 	if ( err !== null ) {
 		cb( null, err );
 	} else {
-		var parser = getParser( env, 'text/x-mediawiki/full' );
-		parser.on( 'document', cb.bind( null, src, null ) );
+		// If we got some expansions passed in, prime the caches with it.
+		if (expansions) {
+			env.transclusionCache = expansions.transclusions;
+			env.extensionCache = expansions.extensions;
+			env.fileCache = expansions.files;
+		}
+
+		// Now go ahead with the actual parsing
+		var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
+		parser.on( 'document', cb.bind( null, env, null ) );
 		try {
-			env.text = src;
-			parser.process( src );
+			parser.processToplevelDoc( src );
 		} catch ( e ) {
 			env.errCB(e);
 			cb( null, e );
 		}
 	}
-},
-
-getParserEnv = function ( ls, config ) {
-	var ParserEnv = require( './mediawiki.parser.environment.js' ).MWParserEnvironment,
-		env = new ParserEnv( {
-		// stay within the 'proxied' content, so that we can click around
-		wgScriptPath: '/', //http://en.wikipedia.org/wiki',
-		wgScriptExtension: '.php',
-		// XXX: add options for this!
-		wgUploadPath: 'http://upload.wikimedia.org/wikipedia/commons',
-		fetchTemplates: true,
-		// enable/disable debug output using this switch
-		debug: false,
-		trace: false,
-		maxDepth: 40
-	} );
-
-	// add mediawiki.org
-	env.setInterwiki( 'mw', 'http://www.mediawiki.org/w' );
-
-	// add localhost default
-	env.setInterwiki( 'localhost', 'http://localhost/w' );
-
-	// add the dump in case we want to use that
-	env.setInterwiki( 'dump', 'http://dump-api.wmflabs.org/w' );
-	env.setInterwiki( 'dump-internal', 'http://10.4.0.162/w' );
-
-	// Apply local settings
-	if ( ls && ls.setup ) {
-		ls.setup( config, env );
-	}
-
-	return env;
 };
 
-Util.getParserEnv = getParserEnv;
-Util.getParser = getParser;
-Util.parse = parse;
-
-Util.getPageSrc = function ( env, title, cb, oldid ) {
+Util.getPageSrc = function ( env, title, oldid, cb ) {
 	title = env.resolveTitle( title, '' );
 	var pageRequest = new TemplateRequest( env, title, oldid );
-	pageRequest.once( 'src', cb );
+	pageRequest.once( 'src', function(err, page) {
+		cb(err, page && page.revision ? page.revision['*'] : null);
+	});
+};
+
+/**
+ * @property linkTrailRegex
+ *
+ * This regex was generated by running through *all unicode characters* and
+ * testing them against *all regexes* for linktrails in a default MW install.
+ * We had to treat it a little bit, here's what we changed:
+ *
+ * 1. A-Z, though allowed in Walloon, is disallowed.
+ * 2. '"', though allowed in Chuvash, is disallowed.
+ * 3. '-', though allowed in Icelandic (possibly due to a bug), is disallowed.
+ * 4. '1', though allowed in Lak (possibly due to a bug), is disallowed.
+ */
+Util.linkTrailRegex = new RegExp(
+	'^[^\0-`{÷ĀĈ-ČĎĐĒĔĖĚĜĝĠ-ĪĬ-įĲĴ-ĹĻ-ĽĿŀŅņŉŊŌŎŏŒŔŖ-ŘŜŝŠŤŦŨŪ-ŬŮŲ-ŴŶŸ' +
+	'ſ-ǤǦǨǪ-Ǯǰ-ȗȜ-ȞȠ-ɘɚ-ʑʓ-ʸʽ-̂̄-΅·΋΍΢Ϗ-ЯѐѝѠѢѤѦѨѪѬѮѰѲѴѶѸѺ-ѾҀ-҃҅-ҐҒҔҕҘҚҜ-ҠҤ-ҪҬҭҰҲ' +
+	'Ҵ-ҶҸҹҼ-ҿӁ-ӗӚ-ӜӞӠ-ӢӤӦӪ-ӲӴӶ-ՠֈ-׏׫-ؠً-ٳٵ-ٽٿ-څڇ-ڗڙ-ڨڪ-ڬڮڰ-ڽڿ-ۅۈ-ۊۍ-۔ۖ-਀਄਋-਎਑਒' +
+	'਩਱਴਷਺਻਽੃-੆੉੊੎-੘੝੟-੯ੴ-჏ჱ-ẼẾ-​\u200d-‒—-‗‚‛”--\ufffd\ufffd]+$' );
+
+/**
+ * @method isLinkTrail
+ *
+ * Check whether some text is a valid link trail.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+Util.isLinkTrail = function ( text ) {
+	if ( text && text.match && text.match( this.linkTrailRegex ) ) {
+		return true;
+	} else {
+		return false;
+	}
+};
+
+/**
+ * @method stripPipeTrickChars
+ *
+ * Strip pipe trick chars off a link target
+ *
+ * Example: 'Foo (bar)' -> 'Foo'
+ *
+ * Used by the LinkHandler and the WikitextSerializer.
+ *
+ * @param {string} target
+ * @returns {string}
+ */
+Util.stripPipeTrickChars = function ( target ) {
+	var res;
+	// TODO: get this from somewhere else, hard-coding is fun but ultimately bad
+	// Valid title characters
+	var tc = '[%!\"$&\'\\(\\)*,\\-.\\/0-9:;=?@A-Z\\\\^_`a-z~\\x80-\\xFF+]';
+	// Valid namespace characters
+	var nc = '[ _0-9A-Za-z\x80-\xff-]';
+
+	// [[ns:page (context)|]] -> page
+	var p1 = new RegExp( '(:?' + nc + '+:|:|)(' + tc + '+?)( ?\\(' + tc + '+\\))' );
+	// [[ns:page（context）|]] -> page (different form of parenthesis)
+	var p2 = new RegExp( '(:?' + nc + '+:|:|)(' + tc + '+?)( ?（' + tc + '+）)' );
+	// page, context -> page
+	var p3 = new RegExp( '(, |，)' + tc + '+' );
+
+	res = target.replace( p1, '$2' );
+	res = res.replace( p2, '$2' );
+	return res.replace( p3, '' );
+};
+
+/**
+ * @method decodeEntity
+ *
+ * Decode HTML5 entities in text.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+Util.decodeEntities = function ( text ) {
+    return entities.decodeHTML5(text);
+};
+
+
+/**
+ * @method escapeEntities
+ *
+ * Entity-escape anything that would decode to a valid HTML entity
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+Util.escapeEntities = function ( text ) {
+	// [CSA] replace with entities.encode( text, 2 )?
+	// but that would encode *all* ampersands, where we apparently just want
+	// to encode ampersands that precede valid entities.
+	return text.replace(/&[#0-9a-zA-Z]+;/g, function(match) {
+		var decodedChar = Util.decodeEntities(match);
+		if ( decodedChar !== match ) {
+			// Escape the and
+			return '&amp;' + match.substr(1);
+		} else {
+			// Not an entity, just return the string
+			return match;
+		}
+	});
+};
+
+Util.isHTMLElementName = function (name) {
+	name = name.toUpperCase();
+	return name in Consts.HTML.HTML5Tags || name in Consts.HTML.OlderHTMLTags;
+};
+
+/**
+ * Determine whether the protocol of a link is potentially valid. Use the
+ * environment's per-wiki config to do so.
+ */
+Util.isProtocolValid = function ( linkTarget, env ) {
+	var wikiConf = env.conf.wiki;
+	if ( typeof linkTarget === 'string' ) {
+		return wikiConf.hasValidProtocol( linkTarget );
+	} else {
+		return true;
+	}
 };
 
 if (typeof module === "object") {

@@ -102,7 +102,6 @@ ParagraphWrapper.prototype.resetCurrLine = function(atEOL) {
 	this.currLine = {
 		tokens: [],
 		isNewline: atEOL,
-		hasComments: false,
 		hasBlockToken: false,
 		hasWrappableTokens: false
 	};
@@ -122,13 +121,6 @@ ParagraphWrapper.prototype.onNewLineOrEOF = function (  token, frame, cb ) {
 		this.hasOpenPTag = true;
 	}
 
-	// PHP parser ignores (= strips out during preprocessing) lines with
-	// a comment and other white-space. This flag checks if we are on such a line.
-	var emptyLineWithComments =
-		l.isNewline &&
-		!l.hasWrappableTokens &&
-		l.hasComments;
-
 	// this.nonNlTokens += this.currLine.tokens
 	this.nonNlTokens = this.nonNlTokens.concat(l.tokens);
 
@@ -143,16 +135,6 @@ ParagraphWrapper.prototype.onNewLineOrEOF = function (  token, frame, cb ) {
 		this.hasOpenHTMLPTag = false;
 		this.reset();
 		return { tokens: res };
-	} else if (emptyLineWithComments) {
-		// 1. Dont increment newline count on "empty" lines with
-		//    one or more comments -- see comment above
-		//
-		// 2. Convert the NlTk to a String-representation so that
-		//    it doesn't get processed by discardOneNlTk -- this
-		//    newline needs to be emitted (so it gets RTed) without
-		//    being processed for p-wrapping.
-		this.nlWsTokens.push("\n");
-		return {};
 	} else {
 		this.newLineCount++;
 		this.nlWsTokens.push(token);
@@ -227,12 +209,17 @@ ParagraphWrapper.prototype.processPendingNLs = function (isBlockToken) {
 
 ParagraphWrapper.prototype.onAny = function ( token, frame ) {
 	function updateTableContext(tblTags, token) {
-		function popTags(tblTags, tokenName, altTag1, altTag2) {
-			while (tblTags.length > 0) {
-				var topTag = tblTags.pop();
-				if (topTag === tokenName || topTag === altTag1 || topTag === altTag2) {
-					break;
-				}
+		// popUntil: pop anything until one of the tag in this array is found.
+		//           Pass null to disable.
+		// popThen: after a stop is reached (or popUntil was null), continue
+		//			popping as long as the elements in this array match. Pass
+		//			null to disable.
+		function popTags(tblTags, popUntil, popThen) {
+			while (popUntil && tblTags.length > 0 && popUntil.indexOf(tblTags.last()) === -1) {
+				tblTags.pop();
+			}
+			while (popThen && tblTags.length > 0 && popThen.indexOf(tblTags.last()) !== -1) {
+				tblTags.pop();
 			}
 		}
 
@@ -243,23 +230,24 @@ ParagraphWrapper.prototype.onAny = function ( token, frame ) {
 			} else {
 				switch (tokenName) {
 				case "table":
-					// Pop till we match
-					popTags(tblTags, tokenName);
+					// Pop a table scope
+					popTags(tblTags, ["table"], ["table"]);
 					break;
 				case "tbody":
-					// Pop till we match
-					popTags(tblTags, tokenName, "table");
+					// Pop to the nearest table
+					popTags(tblTags, ["table"], null);
 					break;
 				case "tr":
-					// Pop till we match
-					popTags(tblTags, tokenName, "table", "tbody");
+				case "thead":
+				case "tfoot":
+				case "caption":
+					// Pop to tbody or table, whichever is nearer
+					popTags(tblTags, ["tbody", "table"], null);
 					break;
 				case "td":
 				case "th":
-					// Pop just the topmost tag if it matches the token
-					if (tblTags.last() === token.name) {
-						tblTags.pop();
-					}
+					// Pop to tr or (if that fails) to tbody or table.
+					popTags(tblTags, ["tr", "tbody", "table"], null);
 					break;
 				}
 			}
@@ -302,11 +290,10 @@ ParagraphWrapper.prototype.onAny = function ( token, frame ) {
 		}
 	} else if (tc === EOFTk || this.inPre) {
 		return { tokens: [token] };
-	} else if ((tc === String && token.match( /^[\t ]*$/)) || tc === CommentTk) {
-		if (tc === CommentTk) {
-			this.currLine.hasComments = true;
-		}
-
+	} else if (tc === CommentTk ||
+		tc === String && token.match(/^[\t ]*$/) ||
+		Util.isEmptyLineMetaToken(token))
+	{
 		if (this.newLineCount === 0) {
 			this.currLine.tokens.push(token);
 			// Since we have no pending newlines to trip us up,

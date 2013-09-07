@@ -75,7 +75,7 @@ WikiLinkHandler.prototype.getWikiLinkTargetInfo = function (token) {
 	href = href.replace(/^(?:\.\/)+/, '');
 	info.href = href;
 
-	var hrefBits = href.match(/^([^:]+):(.+)$/);
+	var hrefBits = href.match(/^([^:]+):(.*)$/);
 	href = env.normalizeTitle( href, false, true );
 	if ( hrefBits ) {
 		var nsPrefix = hrefBits[1];
@@ -83,9 +83,9 @@ WikiLinkHandler.prototype.getWikiLinkTargetInfo = function (token) {
 		var interwikiInfo = env.conf.wiki.interwikiMap[nsPrefix.toLowerCase()
 														.replace( ' ', '_' )],
 			// check for interwiki / language links
-			ns = env.conf.wiki.canonicalNamespaces[ nsPrefix.toLowerCase()
+			ns = env.conf.wiki.namespaceIds[ nsPrefix.toLowerCase()
 														.replace( ' ', '_' ) ];
-		//console.warn( JSON.stringify( [ nsText, ns ] ) );
+		//console.warn( nsPrefix, ns, env.conf.wiki.namespaceIds );
 		// also check for url to protect against [[constructor:foo]]
 		if ( interwikiInfo && interwikiInfo.url ) {
 			// interwiki or language link
@@ -1372,18 +1372,19 @@ ExternalLinkHandler.prototype.onExtLink = function ( token, manager, cb ) {
 	//console.warn( 'mw:content: ' + JSON.stringify( content, null, 2 ) );
 
 	var dataAttribs = Util.clone(token.dataAttribs);
-	var rdfaType = token.getAttribute('typeof'), magLinkRe = /\bmw:ExtLink\/(?:ISBN|RFC|PMID)\b/;
-	if ( rdfaType && rdfaType.match( magLinkRe ) ) {
-		if ( rdfaType.match( /\bmw:ExtLink\/ISBN/ ) ) {
+	var rdfaType = token.getAttribute('typeof'),
+		magLinkRe = /(?:^|\s)(mw:ExtLink\/(?:ISBN|RFC|PMID))(?=$|\s)/;
+	if ( rdfaType && magLinkRe.test(rdfaType) ) {
+		if ( /(?:^|\s)mw:ExtLink\/ISBN/.test(rdfaType) ) {
 			title = Title.fromPrefixedText( env, href );
 			newAttrs = [
 				new KV('href', title.makeLink()),
-				new KV('rel', rdfaType.match( magLinkRe )[0] )
+				new KV('rel', rdfaType.match( magLinkRe )[1] )
 			];
 		} else {
 			newAttrs = [
 				new KV('href', href),
-				new KV('rel', rdfaType.match( magLinkRe )[0] )
+				new KV('rel', rdfaType.match( magLinkRe )[1] )
 			];
 		}
 

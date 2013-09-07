@@ -13,7 +13,7 @@ function stripMarkerMetas(editMode, node) {
 	var metaType = node.getAttribute("typeof");
 	if (metaType &&
 		// TODO: Use /Start for all Transclusion / Param markers!
-		(metaType.match(/\bmw:(StartTag|EndTag|Extension\/ref\/Marker|TSRMarker)\/?[^\s]*\b/) &&
+		(/(?:^|\s)mw:(StartTag|EndTag|Extension\/ref\/Marker|TSRMarker)\/?[^\s]*/.test(metaType) &&
 		!node.getAttribute("property")) ||
 		(editMode && metaType === "mw:Placeholder/StrippedTag")
 	) {
@@ -35,7 +35,14 @@ function cleanupAndSaveDataParsoid( node ) {
 		if (dp) {
 			// Delete empty auto-inserted elements
 			var next = node.nextSibling;
-			if (node.childNodes.length === 0 && dp.autoInsertedStart && dp.autoInsertedEnd) {
+			if (dp.autoInsertedStart && dp.autoInsertedEnd &&
+				(node.childNodes.length === 0 ||
+				node.childNodes.length === 1 && !DU.isElt(node.firstChild) && /^\s*$/.test(node.textContent)))
+			{
+				if (node.firstChild) {
+					// migrate the ws out
+					node.parentNode.insertBefore(node.firstChild, node);
+				}
 				DU.deleteNode(node);
 				return next;
 			}
@@ -46,7 +53,7 @@ function cleanupAndSaveDataParsoid( node ) {
 			// valid data-mw and dsr.  This should reduce data-parsoid bloat.
 			//
 			// Transcluded nodes will not have dp.tsr set and dont need dp.src either
-			if (/\bmw:(Transclusion|Extension)\b/.test(node.getAttribute("typeof")) &&
+			if (/(?:^|\s)mw:(Transclusion|Extension)(?=$|\s)/.test(node.getAttribute("typeof")) &&
 				(!dp.tsr ||
 				node.getAttribute("data-mw") && dp.dsr && dp.dsr[0] && dp.dsr[1]))
 			{

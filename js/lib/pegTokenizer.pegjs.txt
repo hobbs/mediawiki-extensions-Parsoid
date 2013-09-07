@@ -1207,9 +1207,23 @@ link_end = "]]"
  * bolds/italics and MediaWiki's special heuristics for apostrophes, which are
  * all not context free. */
 quote = "''" x:"'"* {
-    var res = new SelfclosingTagTk( 'mw-quote', [], { tsr: [pos0, pos] } ); // Will be consumed in token transforms
-    res.value = "''" + x.join('');
-    return res;
+    // sequences of four or more than five quotes are assumed to start
+    // with some number of plain-text apostrophes.
+    var quotes = "''" + x.join(''), plainticks = 0, result = [];
+    if (quotes.length === 4) {
+        plainticks = 1;
+    } else if (quotes.length > 5) {
+        plainticks = quotes.length - 5;
+    }
+    if (plainticks > 0) {
+        result.push(quotes.substring(0, plainticks));
+    }
+    // mw-quote token Will be consumed in token transforms
+    var mwq = new SelfclosingTagTk( 'mw-quote', [],
+        { tsr: [pos0 + plainticks, pos] } );
+    mwq.value = quotes.substring(plainticks);
+    result.push(mwq);
+    return result;
 }
 
 
@@ -2280,19 +2294,20 @@ optionalNewlines
         }
     }
 
+sol = empty_line_with_comments / normal_sol
+
+sol_prefix
+  = newlineToken
+  / & {
+      // Use saved sol-state only at start of input
+      // If we have saved state of not being in sol posn, fail the production
+      // NOTE: Explicitly check for 'false' and not a falsy value
+      return pos === 0 && pegArgs.pegTokenizer.savedSOL !== false;
+  } { return []; }
 
 // Start of line
-sol
-  = nl:(
-       newlineToken
-       / & {
-         // Use saved sol-state only at start of input
-         // If we have saved state of not being in sol posn, fail the production
-         // NOTE: Explicitly check for 'false' and not a falsy value
-         return pos === 0 && pegArgs.pegTokenizer.savedSOL !== false;
-       }
-       { return []; }
-    )
+normal_sol
+  = nl:sol_prefix
     // Eat multi-line comment, so that syntax after still matches as if it
     // was actually preceded by a newline
     cn:( c:comment n:newlineToken? {
@@ -2324,6 +2339,17 @@ sol
         }
 
         return nl.concat(cn, niToken);
+    }
+
+empty_line_with_comments
+  = sp:sol_prefix p:({return pos;}) c:(space* comment (space / comment)* newline)+ {
+        return [
+            sp,
+            new SelfclosingTagTk("meta", [new KV('typeof', 'mw:EmptyLine')], {
+                tokens: flattenIfArray(c),
+                tsr: [p, pos]
+            })
+        ];
     }
 
 comment_space = comment / space

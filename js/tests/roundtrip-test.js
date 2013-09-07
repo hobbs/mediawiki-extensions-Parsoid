@@ -4,6 +4,7 @@
 var jsDiff = require( 'diff' ),
 	optimist = require( 'optimist' ),
 	domino = require( 'domino' ),
+	zlib = require( 'zlib' ),
 
 	Util = require( '../lib/mediawiki.Util.js' ).Util,
 	DU = require( '../lib/mediawiki.DOMUtils.js' ).DOMUtils,
@@ -56,44 +57,65 @@ var plainCallback = function ( env, err, results ) {
 	return output;
 };
 
+var encodeXmlEntities = function( str ) {
+	return str.replace( /&/g, '&amp;' )
+			  .replace( /</g, '&lt;' )
+			  .replace( />/g, '&gt;' );
+};
+
 var xmlCallback = function ( env, err, results ) {
 	var i, result;
-	var prefix = ( env && env.wiki && env.wiki.iwp ) || '';
+	var prefix = ( env && env.conf && env.conf.wiki && env.conf.wiki.iwp ) || '';
 	var title = ( env && env.page && env.page.name ) || '';
 
-	var output = '<testsuite name="Roundtrip article ' + Util.encodeXml( prefix + ':' + title ) + '">';
+	var output = '<testsuite name="Roundtrip article ' + encodeXmlEntities( prefix + ':' + title ) + '">';
 
 	if ( err ) {
 		output += '<testcase name="entire article"><error type="parserFailedToFinish">';
-		output += Util.encodeXml( err.stack || err.toString() );
+		output += encodeXmlEntities( err.stack || err.toString() );
 		output += '</error></testcase>';
 	} else {
 
 		for ( i = 0; i < results.length; i++ ) {
 			result = results[i];
 
-			output += '<testcase name="' + Util.encodeXml( prefix + ':' + title ) + ' character ' + result.offset[0].start + '">';
+			output += '<testcase name="' + encodeXmlEntities( prefix + ':' + title ) + ' character ' + result.offset[0].start + '">';
 
 			if ( result.type === 'fail' ) {
 				output += '<failure type="significantHtmlDiff">\n';
 
 				output += '<diff class="wt">\n';
-				output += Util.encodeXml( result.wtDiff );
+				output += encodeXmlEntities( result.wtDiff );
 				output += '\n</diff>\n';
 
 				output += '<diff class="html">\n';
-				output += Util.encodeXml( result.htmlDiff );
+				output += encodeXmlEntities( result.htmlDiff );
 				output += '\n</diff>\n';
 
 				output += '</failure>\n';
 			} else {
 				output += '<skipped type="insignificantWikitextDiff">\n';
-				output += Util.encodeXml( result.wtDiff );
+				output += encodeXmlEntities( result.wtDiff );
 				output += '\n</skipped>\n';
 			}
 
 			output += '</testcase>\n';
 		}
+	}
+
+	// Output the profiling data
+	if ( env.profile ) {
+		output += '<perfstats>\n';
+		for ( var type in env.profile ) {
+			for ( var prop in env.profile[ type ] ) {
+				output += '<perfstat type="' + Util.encodeXml( type ) + ':';
+				output += Util.encodeXml( prop );
+				output += '">';
+				output += Util.encodeXml( env.profile[ type ][ prop ].toString() );
+				output += '</perfstat>\n';
+			}
+		}
+		output += '</perfstats>\n';
 	}
 
 	output += '</testsuite>\n';
@@ -140,6 +162,7 @@ var findMatchingNodes = function (root, targetRange, sourceLen) {
 
 		var c = element.firstChild;
 		while (c) {
+
 			wasWaiting = waitingForEndMatch;
 			if ( DU.isElt(c) ) {
 				var res = walkDOM(c);
@@ -381,9 +404,17 @@ var roundTripDiff = function ( env, document, cb ) {
 	// Re-parse the HTML to uncover foster-parenting issues
 	var origBody = document.body;
 	document = domino.createDocument(document.outerHTML);
-
 	try {
+		env.profile.time.serialize = new Date();
 		out = new WikitextSerializer( { env: env } ).serializeDOM(document.body);
+		env.profile.time.serialize = new Date() - env.profile.time.serialize;
+		env.profile.size.domserialized = out.length;
+
+		// Finish the total time now
+		if ( env.profile && env.profile.time ) {
+			env.profile.time.total += new Date() - env.profile.time.total_timer;
+			delete( env.profile.time.total_timer );
+		}
 		diff = jsDiff.diffLines( out, env.page.src );
 		offsetPairs = Util.convertDiffToOffsetPairs( diff );
 
@@ -408,6 +439,7 @@ var fetch = function ( page, cb, options ) {
 			env.errCB( err );
 			return;
 		}
+		env.profile = { time: { total: 0, total_timer: new Date() }, size: {} };
 
 		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
 		var tpr = new TemplateRequest( env, target, null );
@@ -417,11 +449,22 @@ var fetch = function ( page, cb, options ) {
 				cb( err, env, [] );
 			} else {
 				env.setPageSrcInfo( src_and_metadata );
-				Util.parse( env, function ( src, err, out ) {
+				env.profile.time.parse = new Date();
+				Util.parse( env, function ( src, err, doc ) {
+					env.profile.time.parse = new Date() - env.profile.time.parse;
 					if ( err ) {
 						cb( err, env, [] );
 					} else {
-						roundTripDiff( env, out, cb );
+						// Pause the total time while we compute these sizes
+						env.profile.time.total += new Date() - env.profile.time.total_timer;
+						env.profile.size.htmlraw = doc.outerHTML.length;
+						zlib.gzip( doc.outerHTML, function( err, buf ) {
+							if ( !err ) {
+								env.profile.size.htmlgzip = buf.length;
+							}
+							env.profile.time.total_timer = new Date();
+							roundTripDiff( env, doc, cb );
+						});
 					}
 				}, err, env.page.src );
 			}

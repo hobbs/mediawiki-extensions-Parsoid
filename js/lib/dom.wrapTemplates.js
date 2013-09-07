@@ -135,11 +135,12 @@ function getDOMRange( env, doc, startElem, endMeta, endElem ) {
 		var done = false;
 		var tcDP = DU.getDataParsoid( tcStart );
 		var seDP = DU.getDataParsoid( startElem );
-		if (tcDP && seDP && tcDP.dsr && seDP.dsr && tcDP.dsr[1] > seDP.dsr[1]) {
-			// Since TSRs on template content tokens are cleared by the
-			// template handler, all computed dsr values for template content
-			// is always inferred from top-level content values and is safe.
-			// So, do not overwrite a bigger end-dsr value.
+
+		// Since TSRs on template content tokens are cleared by the
+		// template handler, all computed dsr values for template content
+		// is always inferred from top-level content values and is safe.
+		// So, do not overwrite a bigger end-dsr value.
+		if (seDP.dsr && (tcDP.dsr && tcDP.dsr[1] > seDP.dsr[1])) {
 			tcDP.dsr[0] = seDP.dsr[0];
 			done = true;
 		}
@@ -170,7 +171,7 @@ function findTopLevelNonOverlappingRanges(document, env, tplRanges) {
 		} else {
 			// Remove mw:* from the typeof
 			var type = meta.getAttribute("typeof");
-			type = type.replace(/\bmw:[^\/]*(\/[^\s]+|\b)/, '');
+			type = type.replace(/(?:^|\s)mw:[^\/]*(\/[^\s]+|(?=$|\s))/g, '');
 			meta.setAttribute("typeof", type);
 		}
 	}
@@ -519,6 +520,10 @@ function encapsulateTemplates( doc, env, tplRanges, tplArrays) {
 		var dp1 = DU.getDataParsoid( tcStart ),
 			dp2 = DU.getDataParsoid( tcEnd ),
 			done = false;
+		/*
+		console.warn("dp1: " + JSON.stringify(dp1));
+		console.warn("dp2: " + JSON.stringify(dp2));
+		*/
 		if (dp1.dsr) {
 			if (dp2.dsr) {
 				// Case 1. above
@@ -529,12 +534,13 @@ function encapsulateTemplates( doc, env, tplRanges, tplArrays) {
 				// Case 2. above
 				var endDsr = dp2.dsr[0];
 				if (DU.hasNodeName(tcEnd, 'table') &&
-					((endDsr !== null && endDsr < dp1.dsr[0]) ||
-					 (tcStart.data && tcStart.data.parsoid.fostered)))
+					endDsr !== null &&
+					(endDsr < dp1.dsr[0] || tcStart.data && tcStart.data.parsoid.fostered))
 				{
 					dp1.dsr[0] = endDsr;
 				}
 			}
+
 
 			// Check if now have a useable range on dp1
 			if (dp1.dsr[0] !== null && dp1.dsr[1] !== null) {
@@ -587,7 +593,7 @@ function encapsulateTemplates( doc, env, tplRanges, tplArrays) {
 				});
 
 				// Output the data-mw obj.
-				var datamw = (tplArray.length === 1) ? tplArray[0].template : { parts: tplArray };
+				var datamw = { parts: tplArray };
 				range.start.setAttribute("data-mw", JSON.stringify(datamw));
 				range.start.data.parsoid.pi = paramInfoArrays;
 			}
@@ -605,7 +611,7 @@ function encapsulateTemplates( doc, env, tplRanges, tplArrays) {
 		// However, tcStart (= range.start), even if a meta, need not be
 		// a marker meta added for the template.
 		if (DU.hasNodeName(startElem, "meta") &&
-				/\bmw:(:?Transclusion|Param)\b/.test(startElem.getAttribute('typeof'))) {
+				/(?:^|\s)mw:(:?Transclusion|Param)(?=$|\s)/.test(startElem.getAttribute('typeof'))) {
 			DU.deleteNode(startElem);
 		}
 
@@ -642,7 +648,7 @@ function findWrappableTemplateRanges( doc, env, root, tpls ) {
 		if ( DU.isElt(elem) ) {
 			var type = elem.getAttribute( 'typeof' ),
 				// SSS FIXME: This regexp differs from that in isTplMetaType
-				metaMatch = type ? type.match( /\b(mw:(?:Transclusion|Param)(\/[^\s]+)?)\b/ ) : null;
+				metaMatch = type ? type.match( /(?:^|\s)(mw:(?:Transclusion|Param)(\/[^\s]+)?)(?=$|\s)/ ) : null;
 
 			// Ignore templates without tsr.
 			//
@@ -655,13 +661,13 @@ function findWrappableTemplateRanges( doc, env, root, tpls ) {
 			// on end-meta-tags.
 			//
 			// Ex: "<ref>{{echo|bar}}<!--bad-></ref>"
-			if (metaMatch && ( DU.getDataParsoid( elem ).tsr || type.match(/\/End\b/))) {
+			if (metaMatch && ( DU.getDataParsoid( elem ).tsr || /\/End(?=$|\s)/.test(type))) {
 				var metaType = metaMatch[1];
 
 				about = elem.getAttribute('about');
 				aboutRef = tpls[about];
 				// Is this a start marker?
-				if (!metaType.match(/\/End\b/)) {
+				if (!/\/End(?=$|\s)/.test(metaType)) {
 					if ( aboutRef ) {
 						aboutRef.start = elem;
 						// content or end marker existed already

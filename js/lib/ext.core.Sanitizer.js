@@ -579,11 +579,32 @@ JSUtils.deepFreeze(SanitizerConstants);
  * @param {TokenTransformManager} manager The manager for this part of the pipeline.
  */
 function Sanitizer ( manager ) {
+	// FIXME: would be good to make the sanitizer independent of the manager
+	// so that it can be used separately. See
+	// https://bugzilla.wikimedia.org/show_bug.cgi?id=52941
 	this.manager = manager;
 	this.register( manager );
 	this.constants = SanitizerConstants;
 	this.attrWhiteListCache = {};
 }
+
+/**
+ * Utility function: Sanitize an array of tokens. Not used in normal token
+ * pipelines. The only caller is currently in dom.t.TDFixups.js.
+ *
+ * TODO: Move to Util / generalize when working on bug 52941?
+ */
+Sanitizer.prototype.sanitizeTokens = function (tokens) {
+	var res = [],
+		sanitizer = this;
+	tokens.forEach(function(token) {
+		if(token.name && token.name === 'a') {
+			token = sanitizer.onAnchor(token).token;
+		}
+		res.push(sanitizer.onAny(token).token);
+	});
+	return res;
+};
 
 Sanitizer.prototype.getAttrWhiteList = function(tag) {
 	var awlCache = this.attrWhiteListCache;
@@ -664,6 +685,11 @@ Sanitizer.prototype.onAnchor = function ( token ) {
  * attribute in the DOM).
  */
 Sanitizer.prototype.onAny = function ( token ) {
+	// Pass through a transparent line meta-token
+	if (Util.isEmptyLineMetaToken(token)) {
+		return { token: token };
+	}
+
 	// XXX: validate token type according to whitelist and convert non-ok ones
 	// back to text.
 
@@ -877,6 +903,25 @@ Sanitizer.prototype.escapeId = function(id, options) {
 	return id;
 };
 
+// SSS FIXME: There is a test in mediawiki.environment.js that doles out
+// and tests about ids. There are probably some tests in mediawiki.Util.js
+// as well. We should move all these kind of tests somewhere else.
+Sanitizer.prototype.isParsoidAttr = function(k, v) {
+	// NOTES:
+	// 1. Currently the tokenizer unconditionally escapes typeof and about
+	//    attributes from wikitxt to data-x-typeof and data-x-about. So,
+	//    this check will only pass through Parsoid inserted attrs.
+	// 2. But, if we fix the over-aggressive escaping in the tokenizer to
+	//    not escape non-Parsoid typeof and about, then this will return
+	//    true for something like typeof='mw:Foo evilScriptHere'. But, that
+	//    is safe since this check is only used to see if we should
+	//    unconditionally discard the entire attribute or process it further.
+	//    That further processing will catch and discard any dangerous
+	//    strings in the rest of the attribute
+	return k === "typeof" && /(?:^|\s)mw:.+?(?=$|\s)/.test(v) ||
+		k === "about" && /^#mwt\d+$/.test(v);
+};
+
 Sanitizer.prototype.sanitizeTagAttrs = function(newToken, attrs) {
 	var tag       = newToken.name;
 	var allowRdfa = this.constants.globalConfig.allowRdfaAttrs;
@@ -894,24 +939,29 @@ Sanitizer.prototype.sanitizeTagAttrs = function(newToken, attrs) {
 			k = a.k,
 			origK = a.ksrc || k,
 			v = a.v,
-			origV = a.vsrc || v;
+			origV = a.vsrc || v,
+			psdAttr = this.isParsoidAttr(k, v);
 
 		//console.warn('k = ' + k + '; v = ' + v);
 
-		// allow XML namespace declaration if RDFa is enabled
-		if (allowRdfa && k.match(xmlnsRE)) {
-			if (!v.match(evilUriRE)) {
-				newAttrs[k] = [v, origV, origK];
-			} else {
-				newAttrs[k] = [null, origV, origK];
+		// Bypass RDFa/whitelisting checks for Parsoid-inserted attrs
+		// Safe to do since the tokenizer renames about/typeof attrs.
+		// unconditionally. FIXME: The escaping solution in tokenizer
+		// maybe aggressive. There is no need to escape typeof strings
+		// that or about ids that don't resemble Parsoid types/about ids.
+		// To be done.
+		if (!psdAttr) {
+			// If RDFa is enabled, don't block XML namespace declaration
+			if (allowRdfa && k.match(xmlnsRE)) {
+				if (!v.match(evilUriRE)) {
+					newAttrs[k] = [v, origV, origK];
+				} else {
+					newAttrs[k] = [null, origV, origK];
+				}
+				continue;
 			}
-			continue;
-		}
 
-		// SSS FIXME: Temporary hack to let wrapped extension tags through
-		// so that they can be unwrapped.
-		if (k !== 'typeof') {
-			// Allow any attribute beginning with "data-", if in HTML5 mode
+			// If in HTML5 mode, don't block data-* attributes
 			if (!(html5Mode && k.match(/^data-/i)) && wlist[k] !== true) {
 				newAttrs[k] = [null, origV, origK];
 				continue;
@@ -928,16 +978,19 @@ Sanitizer.prototype.sanitizeTagAttrs = function(newToken, attrs) {
 			v = this.escapeId(v, ['noninitial']);
 		}
 
-		//RDFa and microdata properties allow URLs, URIs and/or CURIs. check them for sanity
+		// RDFa and microdata properties allow URLs, URIs and/or CURIs.
+		// Check them for sanity
 		if (k === 'rel' || k === 'rev' ||
 			k === 'about' || k === 'property' || k === 'resource' || // RDFa
 			k === 'datatype' || k === 'typeof' ||                    // RDFa
 			k === 'itemid' || k === 'itemprop' || k === 'itemref' || // HTML5 microdata
 			k === 'itemscope' || k === 'itemtype' ) {                // HTML5 microdata
 
-			//Paranoia. Allow "simple" values but suppress javascript
+			// Paranoia. Allow "simple" values but suppress javascript
 			if (v.match(evilUriRE)) {
-				newAttrs[k] = [null, origV, origK];
+				// Retain the Parsoid typeofs for Parsoid attrs
+				var newV = psdAttr ? origV.replace(/(?:^|\s)(?!mw:\w)[^\s]*/g, '').trim() : null;
+				newAttrs[k] = [newV, origV, origK];
 				continue;
 			}
 		}

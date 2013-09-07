@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 /*
- * Initial parser tests runner for experimental JS parser
+ * Parsoid test runner
  *
- * This pulls all the parserTests.txt items and runs them through the JS
- * parser and JS HTML renderer.
+ * This pulls all the parserTests.txt items and runs them through Parsoid.
  */
-
-(function() {
 
 /**
  * @class ParserTestModule
@@ -767,7 +764,13 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 			// Strip the [[]] markers.
 			var title = item.options.title.replace( /^\[\[|\]\]$/g, '' );
 			title = this.env.normalizeTitle( title, true );
-			this.env.setPageName( title );
+			// This sets the page name as well as the relative link prefix
+			// for the rest of the parse.
+			this.env.reset( title );
+		} else {
+			// Since we are reusing the 'env' object, set it to Main Page
+			// so that relative link prefix is back to "./"
+			this.env.reset( "Main Page" );
 		}
 
 		if ( item.options.subpage !== undefined ) {
@@ -1891,5 +1894,3 @@ if ( popts && popts.xml ) {
 }
 
 ptests.main( popts );
-
-} )();

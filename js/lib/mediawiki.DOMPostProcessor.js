@@ -20,7 +20,7 @@ var domino = require('./domino'),
 	markTreeBuilderFixups = require('./dom.markTreeBuilderFixups.js').markTreeBuilderFixups,
 	migrateStartMetas = require('./dom.migrateStartMetas.js').migrateStartMetas,
 	migrateTrailingNLs = require('./dom.migrateTrailingNLs.js').migrateTrailingNLs,
-	stripDoubleTDs = require('./dom.t.TDFixups.js').stripDoubleTDs,
+	TableFixups = require('./dom.t.TableFixups.js'),
 	stripMarkerMetas = CleanUp.stripMarkerMetas,
 	unpackDOMFragments = require('./dom.t.unpackDOMFragments.js').unpackDOMFragments,
 	wrapTemplates = require('./dom.wrapTemplates.js').wrapTemplates;
@@ -83,9 +83,37 @@ if (testDom.body.getAttribute('somerandomstring') === '') {
 /**
  * Migrate data-parsoid attributes into a property on each DOM node. We'll
  * migrate them back in the final DOM traversal.
+ *
+ * Various mw metas are converted to comments before the tree build to
+ * avoid fostering. Piggy-backing the reconversion here to avoid excess
+ * DOM traversals.
  */
-function migrateDataParsoid( node ) {
+function prepareDOM( node ) {
 	DU.loadDataParsoid( node );
+
+	if ( DU.isComment( node ) && /^\{.*\}$/.test( node.data ) ) {
+
+		var data, type;
+		try {
+			data = JSON.parse( node.data );
+			type = data["@type"];
+		} catch (e) {
+			// not a valid json attribute, do nothing
+			return true;
+		}
+
+		if ( /^mw:/.test( type ) ) {
+			var meta = node.ownerDocument.createElement( "meta" );
+			data.attrs.forEach(function ( attr ) {
+				meta.setAttribute( attr.name, attr.value );
+			});
+			node.parentNode.insertBefore( meta, node );
+			DU.deleteNode( node );
+			return meta;
+		}
+
+	}
+
 	return true;
 }
 
@@ -105,13 +133,13 @@ function DOMPostProcessor(env, options) {
 
 	// DOM traverser that runs before the in-order DOM handlers.
 	var dataParsoidLoader = new DOMTraverser();
-	dataParsoidLoader.addHandler( null, migrateDataParsoid );
+	dataParsoidLoader.addHandler( null, prepareDOM );
 
 	// Common post processing
 	this.processors = [
 		dataParsoidLoader.traverse.bind( dataParsoidLoader ),
-		handleUnbalancedTables,
 		markFosteredContent,
+		handleUnbalancedTables,
 		migrateStartMetas,
 		markTreeBuilderFixups,
 		handlePres,
@@ -136,14 +164,18 @@ function DOMPostProcessor(env, options) {
 	this.processors.push(generateRefs.bind(null,
 				env.conf.parsoid.nativeExtensions.cite.references));
 
+	var domVisitor2 = new DOMTraverser(),
+		tableFixer = new TableFixups.TableFixups(env);
 	// 1. Strip marker metas -- removes left over marker metas (ex: metas
 	//    nested in expanded tpl/extension output).
-	// 2. Fix up DOM for li-hack.
-	// 3. Save data.parsoid into data-parsoid html attribute.
-	var domVisitor2 = new DOMTraverser();
 	domVisitor2.addHandler( 'meta', stripMarkerMetas.bind(null, env.conf.parsoid.editMode) );
+	// 2. Fix up DOM for li-hack.
 	domVisitor2.addHandler( 'li', handleLIHack.bind( null, env ) );
-	domVisitor2.addHandler( 'td', stripDoubleTDs.bind( null, env ) );
+	// 3. Fix up issues from templated table cells and table cell attributes
+	domVisitor2.addHandler( 'td', tableFixer.stripDoubleTDs.bind( tableFixer, env ) );
+	domVisitor2.addHandler( 'td', tableFixer.reparseTemplatedAttributes.bind( tableFixer, env ) );
+	domVisitor2.addHandler( 'th', tableFixer.reparseTemplatedAttributes.bind( tableFixer, env ) );
+	// 4. Save data.parsoid into data-parsoid html attribute.
 	domVisitor2.addHandler( null, cleanupAndSaveDataParsoid );
 	this.processors.push(domVisitor2.traverse.bind(domVisitor2));
 }
@@ -225,6 +257,12 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 		document.documentElement.setAttribute(
 			'about', mwrPrefix + 'revision/' + m.rev_revid );
 	}
+	// Set the parsoid version
+	appendToHead( document, 'meta',
+			{
+				'property': 'mw:parsoidVersion',
+				'content': env.conf.parsoid.version.toString()
+			});
 	var wikiPageUrl = env.conf.wiki.baseURI + env.page.name;
 	appendToHead( document, 'link',
 	              { rel: 'dc:isVersionOf', href: wikiPageUrl } );

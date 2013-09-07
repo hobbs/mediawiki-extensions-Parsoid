@@ -1,12 +1,13 @@
 "use strict";
 
+require('./core-upgrade.js');
 var DU = require('./mediawiki.DOMUtils.js').DOMUtils;
 
 function minimizeInlineTags(root, rewriteable_nodes) {
 	var rewriteable_node_map = null;
 
-	function tail(a) {
-		return a[a.length-1];
+	function printPath(p) {
+		return p.map(function(n) { return n.nodeName; }).join('|');
 	}
 
 	function remove_all_children(node) {
@@ -24,7 +25,7 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 	function init() {
 		rewriteable_node_map = {};
 		for (var i = 0, n = rewriteable_nodes.length; i < n; i++) {
-			rewriteable_node_map[rewriteable_nodes[i].toLowerCase()] = true;
+			rewriteable_node_map[rewriteable_nodes[i].toUpperCase()] = true;
 		}
 	}
 
@@ -54,16 +55,19 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 		var P = [];
 		for (var i = 0; i < n; i++) {
 			var s = children[i];
-			if (DU.isElt(s)) {
+			if (DU.isElt(s) && DU.isEncapsulatedElt(s)) {
+				// Dont descend into template generated content
+				P.push({path: [], orig_parent: node, children: [s]});
+			} else if (DU.isElt(s)) {
 				var p = longest_linear_path(s);
 				if (p.length === 0) {
 					rewrite(s);
 					// console.log("Pushed EMPTY with orig_parent: " + node.nodeName);
 					P.push({path: [], orig_parent: node, children: [s]});
 				} else {
-					var p_tail = tail(p);
+					var p_tail = p.last();
 
-					// console.log("llp: " + p);
+					// console.log("llp: " + printPath(p));
 
 					// process subtree (depth-first)
 					rewrite(p_tail);
@@ -75,7 +79,7 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 						new_children.push(child_nodes[j]);
 					}
 
-					// console.log("Pushed: " + p + ", tail: " + p_tail.nodeName + "; new_children: " + new_children.length);
+					// console.log("Pushed: " + printPath(p) + ", tail: " + p_tail.nodeName + "; new_children: " + new_children.length);
 					P.push({path: p, orig_parent: p_tail, children: new_children});
 				}
 			} else {
@@ -92,10 +96,15 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 
 	function longest_linear_path(node) {
 		var children, path = [];
-		while (DU.isElt(node)) {
+
+		// Do not cross into templates and block tags
+		while (DU.isElt(node) &&
+			!DU.isBlockTag(node.nodeName) &&
+			!DU.isEncapsulatedElt(node))
+		{
 			path.push(node);
 			children = node.childNodes;
-			if ((children.length === 0) || (children.length > 1)) {
+			if (children.length !== 1) {
 				return path;
 			}
 			node = children[0];
@@ -120,13 +129,15 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 
 			if (lcs.length > 0) {
 				// Connect up LCS
-				// console.log("LCS: " + lcs);
+				// console.log("LCS: " + printPath(lcs));
 				var prev = lcs[0];
 				for (var k = 1, lcs_len = lcs.length; k < lcs_len; k++) {
 					var curr = lcs[k];
-					// SSS FIXME: this add/remove can be optimized
 					// console.log("adding " + curr.nodeName + " to " + prev.nodeName);
-					remove_all_children(prev);
+
+					// prev will have exactly one child
+					// -- remove that child and make curr its child
+					prev.removeChild(prev.firstChild);
 					prev.appendChild(curr);
 					prev = curr;
 				}
@@ -137,7 +148,7 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 
 			var paths     = s.paths;
 			var num_paths = paths.length;
-			// console.log("sublist: lcs: " + lcs + ", #paths: " + num_paths);
+			// console.log("sublist: lcs: " + printPath(lcs) + ", #paths: " + num_paths);
 			if (num_paths === 1) {
 				// Nothing more to do!  Stitch things up
 				// two possible scenarios:
@@ -145,16 +156,16 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 				// (b) we have a non-empty path ==> attach the children to the end of the path
 				var p        = paths[0].path;
 				var children = paths[0].children;
-				if (p.length > 0) {
-					var p_tail = tail(p);
+				if (p.length === 0) {
+					add_children(parent_node, children);
+				} else {
+					var p_tail = p.last();
 					remove_all_children(p_tail);
 					add_children(p_tail, children);
-				} else {
-					add_children(parent_node, children);
 				}
 			} else {
 				// Process the sublist
-				rewrite_paths(tail(lcs), strip_lcs(paths, lcs));
+				rewrite_paths(lcs.last(), strip_lcs(paths, lcs));
 			}
 
 			// console.log("done with this sublist");
@@ -162,10 +173,13 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 		// console.log("--done all sublists--");
 	}
 
+	// SSS FIXME: Check attributes between paths here
+	// - if data-parsoid.stx.html, all attributes should match
+	// - if not data-parsoid.stx.html, can only match with non-html tags
 	function common_path(old, new_path) {
 		var hash = {};
 		for (var i = 0, n = new_path.length; i < n; i++) {
-			var e = new_path[i].nodeName.toLowerCase();
+			var e = new_path[i].nodeName;
 			if (is_rewriteable_node(e)) {
 				hash[e] = new_path[i];
 			}
@@ -173,7 +187,7 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 
 		var cp = [];
 		for (i = 0, n = old.length; i < n; i++) {
-			var hit = hash[old[i].nodeName.toLowerCase()];
+			var hit = hash[old[i].nodeName];
 			// Add old path element always.  This effectively picks elements from the leftmost path.
 			if (hit) {
 				cp.push(old[i]);
@@ -190,22 +204,27 @@ function minimizeInlineTags(root, rewriteable_nodes) {
 		// Ex: <b><i><b>BIB</b></i></b> will
 		// Fix this to be more robust
 
+		// console.log("Orig paths:\n-> " + paths.map(function(p) { return printPath(p.path); }).join("\n-> "));
+		// console.log("Stripping " + printPath(lcs));
+
 		var lcs_map = {};
 		for (var i = 0, n = lcs.length; i < n; i++) {
-			lcs_map[lcs[i]] = true;
+			lcs_map[lcs[i].nodeName] = true;
 		}
 
 		for (i = 0, n = paths.length; i < n; i++) {
 			var p = paths[i].path;
 			for (var j = 0, l = p.length; j < l; j++) {
 				// remove matching element
-				if (lcs_map[p[j]]) {
+				if (lcs_map[p[j].nodeName]) {
 					p.splice(j, 1);
 					l--;
 					j--;
 				}
 			}
 		}
+
+		// console.log("Stripped paths:\n-> " + paths.map(function(p) { return printPath(p.path); }).join("\n-> "));
 
 		return paths;
 	}

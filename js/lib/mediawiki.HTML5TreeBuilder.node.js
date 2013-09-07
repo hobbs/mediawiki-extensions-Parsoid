@@ -7,10 +7,12 @@
 
 var events = require('events'),
 	util = require('util'),
-	$ = require( './fakejquery' ),
-	HTML5 = require('./html5/index'),
+	$ = require('./fakejquery'),
+	HTML5 = require('html5'),
+	domino = require('./domino'),
 	defines = require('./mediawiki.parser.defines.js'),
 	Util = require('./mediawiki.Util.js').Util;
+
 // define some constructor shortcuts
 var CommentTk = defines.CommentTk,
     EOFTk = defines.EOFTk,
@@ -26,10 +28,12 @@ FauxHTML5.TreeBuilder = function ( env ) {
 	events.EventEmitter.call(this);
 
 	// The parser we are going to emit our tokens to
-	this.parser = new HTML5.Parser();
+	this.parser = new HTML5.Parser({
+		document: domino.createDocument( '<html></html>' )
+	});
 
 	// Sets up the parser
-	this.parser.parse(this);
+	this.parser.tokenizer = this;
 
 	// implicitly start a new document
 	this.processToken(new TagTk( 'body' ));
@@ -37,8 +41,8 @@ FauxHTML5.TreeBuilder = function ( env ) {
 	this.env = env;
 	this.trace = env.conf.parsoid.debug || (env.conf.parsoid.traceFlags && (env.conf.parsoid.traceFlags.indexOf("html") !== -1));
 
-	// Assigned to start/self-closing tags
-	this.tagId = 1;
+	// Reset variable state
+	this.resetState();
 };
 
 // Inherit from EventEmitter
@@ -53,7 +57,26 @@ FauxHTML5.TreeBuilder.prototype.addListenersOn = function ( emitter ) {
 	emitter.addListener('end', this.onEnd.bind( this ) );
 };
 
+FauxHTML5.TreeBuilder.prototype.resetState = function () {
+	// Assigned to start/self-closing tags
+	this.tagId = 1;
+
+	// Reset the parser
+	this.removeAllListeners( "token" );
+	this.removeAllListeners( "end" );
+	this.parser.setup();
+	this.processToken(new TagTk( 'body' ));
+
+	this.needsReset = false;
+};
+
 FauxHTML5.TreeBuilder.prototype.onChunk = function ( tokens ) {
+
+	// Makes sure the state is also reset for sub-pipelines
+	if (this.needsReset) {
+		this.resetState();
+	}
+
 	var n = tokens.length;
 	if (n === 0) {
 		return;
@@ -81,10 +104,8 @@ FauxHTML5.TreeBuilder.prototype.onEnd = function ( ) {
 
 	this.emit( 'document', document );
 
-	// XXX: more clean up to allow reuse.
-	this.parser.setup();
-	this.processToken(new TagTk( 'body' ));
-	this.tagId = 1; // Reset
+	// Make sure the state is also reset for sub-pipelines
+	this.needsReset = true;
 };
 
 FauxHTML5.TreeBuilder.prototype._att = function (maybeAttribs) {
@@ -92,7 +113,7 @@ FauxHTML5.TreeBuilder.prototype._att = function (maybeAttribs) {
 	if ( maybeAttribs && $.isArray( maybeAttribs ) ) {
 		for(var i = 0, length = maybeAttribs.length; i < length; i++) {
 			var att = maybeAttribs[i];
-			atts.push({nodeName: att.k, nodeValue: att.v});
+			atts.push({name: att.k, value: att.v});
 		}
 	}
 	return atts;
@@ -130,7 +151,7 @@ FauxHTML5.TreeBuilder.prototype.processToken = function (token) {
 		console.warn("T:html: " + JSON.stringify(token));
 	}
 
-	var tName, attrs,
+	var tName, attrs, tTypeOf,
 		self = this,
 		isNotPrecededByPre = function () {
 			return  ! self.lastToken ||
@@ -166,15 +187,45 @@ FauxHTML5.TreeBuilder.prototype.processToken = function (token) {
 			break;
 		case TagTk:
 			tName = token.name;
+			if ( tName === "table" ) {
+				if ( this.trace ) {
+					console.warn('inserting foster box meta');
+				}
+				this.emit('token', {
+					type: 'StartTag',
+					name: 'meta',
+					data: [ { name: "typeof", value: "mw:FosterBox" } ]
+				});
+			}
 			this.emit('token', {type: 'StartTag', name: tName, data: this._att(attribs)});
 			attrs = [];
 			if ( this.trace ) { console.warn('inserting shadow meta for ' + tName); }
-			attrs.push({nodeName: "typeof", nodeValue: "mw:StartTag"});
-			attrs.push({nodeName: "data-stag", nodeValue: tName + ':' + dataAttribs.tagId});
-			this.emit('token', {type: 'StartTag', name: 'meta', data: attrs});
+			attrs.push({name: "typeof", value: "mw:StartTag"});
+			attrs.push({name: "data-stag", value: tName + ':' + dataAttribs.tagId});
+			this.emit('token', { type: 'Comment', data: JSON.stringify({
+				"@type": "mw:shadow",
+				attrs: attrs
+			}) });
 			break;
 		case SelfclosingTagTk:
 			tName = token.name;
+
+			// Re-expand an empty-line meta-token into its constituent comment + WS tokens
+			if (Util.isEmptyLineMetaToken(token)) {
+				this.onChunk(dataAttribs.tokens);
+				break;
+			}
+
+			// Convert mw metas to comments to avoid fostering.
+			tTypeOf = token.getAttribute( "typeof" );
+			if ( tName === "meta" && tTypeOf && tTypeOf.match( /^mw:/ ) ) {
+				this.emit( "token", { type: "Comment", data: JSON.stringify({
+					"@type": tTypeOf,
+					attrs: this._att( attribs )
+				}) });
+				break;
+			}
+
 			this.emit('token', {type: 'StartTag', name: tName, data: this._att(attribs)});
 			if ( HTML5.VOID_ELEMENTS.indexOf( tName ) < 0 ) {
 				// VOID_ELEMENTS are automagically treated as self-closing by
@@ -188,9 +239,12 @@ FauxHTML5.TreeBuilder.prototype.processToken = function (token) {
 
 			if ( this.trace ) { console.warn('inserting shadow meta for ' + tName); }
 			attrs = this._att(attribs);
-			attrs.push({nodeName: "typeof", nodeValue: "mw:EndTag"});
-			attrs.push({nodeName: "data-etag", nodeValue: tName});
-			this.emit('token', {type: 'StartTag', name: 'meta', data: attrs});
+			attrs.push({name: "typeof", value: "mw:EndTag"});
+			attrs.push({name: "data-etag", value: tName});
+			this.emit('token', {type: 'Comment', data: JSON.stringify({
+				"@type": "mw:shadow",
+				attrs: attrs
+			}) });
 			break;
 		case CommentTk:
 			this.emit('token', {type: 'Comment', data: token.value});

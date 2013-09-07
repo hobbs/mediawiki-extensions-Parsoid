@@ -192,11 +192,17 @@ var Util = {
 		}
 
 		// BUG 47854: Treat all mw:Extension/* tokens as non-SOL.
-		if (token.name === 'meta' && /\bmw:Extension\//.test(token.getAttribute('typeof'))) {
+		if (token.name === 'meta' && /(?:^|\s)mw:Extension\//.test(token.getAttribute('typeof'))) {
 			return false;
 		} else {
-			return true;
+			return token.dataAttribs.stx !== 'html';
 		}
+	},
+
+	isEmptyLineMetaToken: function(token) {
+		return token.constructor === pd.SelfclosingTagTk &&
+			token.name === "meta" &&
+			token.getAttribute("typeof") === "mw:EmptyLine";
 	},
 
 	/*
@@ -639,7 +645,7 @@ var Util = {
 		return tokens;
 	},
 
-	// Strip 'end' tokens and trailing newlines
+	// Strip EOFTk token from token chunk
 	stripEOFTkfromTokens: function ( tokens ) {
 		// this.dp( 'stripping end or whitespace tokens' );
 		if ( tokens.constructor !== Array ) {
@@ -648,24 +654,33 @@ var Util = {
 		if ( ! tokens.length ) {
 			return tokens;
 		}
-		// Strip 'end' tokens and trailing newlines
-		var l = tokens[tokens.length - 1];
-		if ( l &&
-		     ( l.constructor === pd.EOFTk ||
-		       l.constructor === pd.NlTk ||
-				( l.constructor === String && l.match( /^\s+$/ ) ) ) ) {
-			var origTokens = tokens;
-			tokens = origTokens.slice();
-			tokens.rank = origTokens.rank;
-			while ( tokens.length &&
-			        (( l.constructor === pd.EOFTk  ||
-			           l.constructor === pd.NlTk )  ||
-			         ( l.constructor === String && l.match( /^\s+$/ ) ) ) )
-			{
-				// this.dp( 'stripping end or whitespace tokens' );
-				tokens.pop();
-				l = tokens[tokens.length - 1];
-			}
+		// Strip 'end' token
+		if ( tokens.length && tokens.last().constructor === pd.EOFTk ) {
+			var rank = tokens.rank;
+			tokens = tokens.slice(0,-1);
+			tokens.rank = rank;
+		}
+
+		return tokens;
+	},
+
+	// Strip NlTk and ws-only trailing text tokens. Used to be part of
+	// stripEOFTkfromTokens, but unclear if this is still needed.
+	// TODO: remove this if this is not needed any more!
+	stripTrailingNewlinesFromTokens: function (tokens) {
+		var token = tokens.last(),
+			lastMatches = function(toks) {
+				var lastTok = toks.last();
+				return lastTok && (
+						lastTok.constructor === pd.NlTk ||
+						lastTok.constructor === String && /^\s+$/.test(token));
+			};
+		if (lastMatches) {
+			tokens = tokens.slice();
+		}
+		while (lastMatches)
+		{
+			tokens.pop();
 		}
 		return tokens;
 	},
@@ -707,16 +722,19 @@ var Util = {
 
 	sanitizeTitleURI: function ( title ) {
 		var bits = title.split('#'),
-			anchor = null;
+			anchor = null,
+			sanitize = function(s) {
+				return s.replace( /[%? \[\]#|]/g, function ( m ) {
+					return encodeURIComponent( m );
+				} );
+			};
 		if ( bits.length > 1 ) {
 			anchor = bits[bits.length - 1];
 			title = title.substring(0, title.length - anchor.length - 1);
 		}
-		title = title.replace( /[%? \[\]#|]/g, function ( m ) {
-			return encodeURIComponent( m );
-		} );
+		title = sanitize(title);
 		if ( anchor !== null ) {
-			title += '#' + anchor;
+			title += '#' + sanitize(anchor);
 		}
 		return title;
 	},
@@ -885,20 +903,26 @@ var normalizeOut = function ( out, parsoidOnly ) {
 	if (!/[^<]*(<\w+(\s+[^\0-\cZ\s"'>\/=]+(="[^"]*")?)*\/?>[^<]*)*/.test(out)) {
 		throw new Error("normalizeOut input is not in standard serialized form");
 	}
-	out = normalizeNewlines( out );
 	if ( !parsoidOnly ) {
-		// ignore troublesome attributes
-		out = out.
+		// Strip comment-and-ws-only lines that PHP parser strips out
+		out = out.replace(/\n[ \t]*<!--([^-]|-(?!->))*-->([ \t]|<!--([^-]|-(?!->))*-->)*\n/g, '\n');
+		// Ignore troublesome attributes.
+		// Strip JSON attributes like data-mw and data-parsoid early so that
+		// comment stripping in normalizeNewlines does not match unbalanced
+		// comments in wikitext source.
+		out = out.replace(/ (data-mw|data-parsoid|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content|title|class)="[^\"]*"/g, '');
+		out = normalizeNewlines( out ).
 			// remove <span typeof="....">....</span>
 			replace(/<span(?:[^>]*) typeof="mw:(?:Placeholder|Nowiki|Transclusion|Entity)"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
-			replace(/ (data-mw|data-parsoid|typeof|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content|title|class)="[^\"]*"/g, '');
+			// strip typeof last
+			replace(/ typeof="[^\"]*"/g, '');
 	} else {
-		out = out.
+		// unnecessary attributes, we don't need to check these
+		// style is in there because we should only check classes.
+		out = out.replace(/ (data-parsoid|prefix|about|rev|datatype|inlist|vocab|content|style)="[^\"]*"/g, '');
+		out = normalizeNewlines( out ).
 			// remove <span typeof="mw:Placeholder">....</span>
 			replace(/<span(?: [^>]+)* typeof="mw:Placeholder"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
-			// unnecessary attributes, we don't need to check these
-			// style is in there because we should only check classes.
-			replace(/ (data-mw|data-parsoid|prefix|about|rev|datatype|inlist|vocab|content|style)="[^\"]*"/g, '').
 			replace(/<\/?(?:meta|link)(?: [^\0-\cZ\s"'>\/=]+(?:="[^"]*")?)*\/?>/g, '');
 	}
 	return out.

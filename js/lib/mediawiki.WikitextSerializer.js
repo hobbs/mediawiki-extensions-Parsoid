@@ -33,6 +33,7 @@ var PegTokenizer = require('./mediawiki.tokenizer.peg.js').PegTokenizer,
 	DU = require('./mediawiki.DOMUtils.js').DOMUtils,
 	pd = require('./mediawiki.parser.defines.js'),
 	Title = require('./mediawiki.Title.js').Title,
+	minimizeWTQuoteTags = require('./dom.minimizeWTQuoteTags.js').minimizeWTQuoteTags,
 	SanitizerConstants = require('./ext.core.Sanitizer.js').SanitizerConstants;
 
 function isValidSep(sep) {
@@ -203,7 +204,7 @@ WEHP.hasWikitextTokens = function ( state, onNewline, options, text, linksOnly )
 
 		// Ignore non-whitelisted html tags
 		if (t.isHTMLTag()) {
-			if (/\bmw:Extension\b/.test(t.getAttribute("typeof")) &&
+			if (/(?:^|\s)mw:Extension(?=$|\s)/.test(t.getAttribute("typeof")) &&
 				options.extName !== t.getAttribute("name"))
 			{
 				return true;
@@ -695,13 +696,13 @@ WSP.escapeWikiText = function ( state, text, opts ) {
 	 * ----------------------------------------------------------------- */
 
 	// SSS FIXME: Move this somewhere else
-	var urlTriggers = /\b(RFC|ISBN|PMID)\b/;
-	var fullCheckNeeded = text.match(urlTriggers);
+	var urlTriggers = /(?:^|\s)(RFC|ISBN|PMID)(?=$|\s)/;
+	var fullCheckNeeded = urlTriggers.test(text);
 
 	// Quick check for the common case (useful to kill a majority of requests)
 	//
 	// Pure white-space or text without wt-special chars need not be analyzed
-	if (!fullCheckNeeded && !text.match(/(^|\n)[ \t]+[^\s]+|[<>\[\]\-\+\|'!=#\*:;~{}]/)) {
+	if (!fullCheckNeeded && !/(^|\n)[ \t]+[^\s]+|[<>\[\]\-\+\|'!=#\*:;~{}]/.test(text)) {
 		// console.warn("---EWT:F1---");
 		return text;
 	}
@@ -1137,9 +1138,9 @@ var getLinkRoundTripData = function( env, node, state ) {
 	// Figure out the type of the link
 	var rel = node.getAttribute('rel');
 	if ( rel ) {
-		var typeMatch = rel.match( /\bmw:[^\b]+/ );
+		var typeMatch = rel.match( /(?:^|\s)(mw:[^\s]+)/ );
 		if ( typeMatch ) {
-			rtData.type = typeMatch[0];
+			rtData.type = typeMatch[1];
 		}
 	}
 
@@ -1188,6 +1189,9 @@ var getLinkRoundTripData = function( env, node, state ) {
 };
 
 function escapeWikiLinkContentString ( contentString, state, contentNode ) {
+	// First, entity-escape the content.
+	contentString = Util.escapeEntities(contentString);
+
 	// Wikitext-escape content.
 	//
 	// When processing link text, we are no longer in newline state
@@ -1289,7 +1293,7 @@ WSP.handleOpt = function ( node, opt, optName, optVal, state, cb ) {
 				val = val.value;
 			}
 
-			if ( rel.match( /\bmw:Image\/Frame\b/ ) && val > 1 ) {
+			if ( /(?:^|\s)mw:Image\/Frame(?=$|\s)/.test(rel) && val > 1 ) {
 				val = 1;
 			}
 
@@ -1802,7 +1806,8 @@ WSP.linkHandler = function(node, state, cb) {
 				if (!target.modified && !linkData.contentModified) {
 					linkTarget = target.value;
 				} else {
-					linkTarget = escapeWikiLinkContentString(linkData.content.string, state, linkData.contentNode);
+					linkTarget = escapeWikiLinkContentString(linkData.content.string,
+							state, linkData.contentNode);
 					linkTarget = this._addColonEscape(linkTarget, linkData);
 				}
 
@@ -1877,7 +1882,7 @@ WSP.linkHandler = function(node, state, cb) {
 			// XXX: Use shadowed href? Storing serialized tokens in
 			// data-parsoid seems to be... wrong.
 			cb( '[' + Util.tokensToString(target.value) + ']', node);
-		} else if ( rel.match( /\bmw:Image/ ) ) {
+		} else if ( /(?:^|\s)mw:Image/.test(rel) ) {
 			this.handleImage( node, state, cb );
 		} else {
 			// Unknown rel was set
@@ -2157,6 +2162,20 @@ function buildListHandler(firstChildNames) {
 	};
 }
 
+/* currentNode is being processed and line has information
+ * about the wikitext line emitted so far. This function checks
+ * if the DOM has a block node emitted on this line till currentNode */
+function currWikitextLineHasBlockNode(line, currentNode) {
+	var n = line.firstNode;
+	while (n && n !== currentNode) {
+		if (DU.isBlockNode(n)) {
+			return true;
+		}
+		n = n.nextSibling;
+	}
+	return false;
+}
+
 WSP.tagHandlers = {
 	dl: buildListHandler({DT:1, DD:1}),
 	ul: buildListHandler({LI:1}),
@@ -2402,7 +2421,8 @@ WSP.tagHandlers = {
 			state.serializeChildren(node, cb, null);
 		},
 		sepnls: {
-			before: function(node, otherNode) {
+			before: function(node, otherNode, state) {
+
 				var otherNodeName = otherNode.nodeName,
 					tdOrBody = JSUtils.arrayToHash(['TD', 'BODY']);
 				if (node.parentNode === otherNode &&
@@ -2413,36 +2433,34 @@ WSP.tagHandlers = {
 					} else {
 						return {min: 0, max: 0};
 					}
-				} else if (otherNode === node.previousSibling &&
-						// p-p transition
-						otherNodeName === 'P' ||
-						// SSS FIXME: Accidentally discovered that this check is buggy
-						// Will investigate in a different patch
-						//
-						// Treat text/p similar to p/p transition
-						// XXX: also check if parent node and first sibling
-						// serializes(|d) to single line.
-						// Only a single line is
-						// needed in that case. Example:
-						// <div>foo</div> a
-						// b
-						((DU.isText(otherNode) &&
-						  otherNode === DU.previousNonSepSibling(node) &&
-						  // FIXME HACK: Avoid forcing two newlines if the
-						  // first line is a text node that ends up on the
-						  // same line as a block
-						  !( ( DU.isBlockNode(node.parentNode) && node.parentNode.nodeName !== 'BODY') ||
-								otherNode.nodeValue.match(/\n(?!$)/)))))
-				{
+				} else if (
+					otherNode === node.previousSibling &&
+					// p-p transition
+					otherNodeName === 'P' ||
+					// Treat text/p similar to p/p transition
+					(
+						DU.isText(otherNode) &&
+						otherNode === DU.previousNonSepSibling(node) &&
+						!currWikitextLineHasBlockNode(state.currLine, otherNode)
+					)
+				) {
 					return {min: 2, max: 2};
 				} else {
 					return {min: 1, max: 2};
 				}
 			},
 			after: function(node, otherNode) {
-				return !(node.lastChild && node.lastChild.nodeName === 'BR') &&
-					otherNode.nodeName === 'P'/* || otherNode.nodeType === node.TEXT_NODE*/ ?
-					{min: 2, max: 2} : {min: 0, max: 2};
+				if (!(node.lastChild && node.lastChild.nodeName === 'BR') &&
+					otherNode.nodeName === 'P') /* || otherNode.nodeType === node.TEXT_NODE*/
+				{
+					return {min: 2, max: 2};
+				} else {
+					// When the other node is a block-node, we want it
+					// to be on a different line from the implicit-wikitext-p-tag
+					// because the p-wrapper in the parser will suppress a html-p-tag
+					// if it sees the block tag on the same line as a text-node.
+					return {min: DU.isBlockNode(otherNode) ? 1 : 0, max: 2};
+				}
 			}
 		}
 	},
@@ -2624,7 +2642,7 @@ WSP.tagHandlers = {
 						}
 					}
 					emitEndTag('</nowiki>', node, state, cb);
-				} else if ( type.match( /\bmw\:(Image|Video)(\/(Frame|Frameless|Thumb))?/ ) ) {
+				} else if ( /(?:^|\s)mw\:(Image|Video)(\/(Frame|Frameless|Thumb))?/.test(type) ) {
 					state.serializer.handleImage( node, state, cb );
 				}
 			} else {
@@ -2773,7 +2791,7 @@ WSP.tagHandlers = {
 		sepnls: {
 			before: function (node, otherNode) {
 				var type = node.getAttribute('rel');
-				if (/\bmw:WikiLink\/Category\b/.test(type) &&
+				if (/(?:^|\s)mw:WikiLink\/Category(?=$|\s)/.test(type) &&
 						!node.getAttribute('data-parsoid')) {
 					// Fresh category link: Serialize on its own line
 					return {min: 1};
@@ -2783,7 +2801,7 @@ WSP.tagHandlers = {
 			},
 			after: function (node, otherNode) {
 				var type = node.getAttribute('rel');
-				if (/\bmw:WikiLink\/Category\b/.test(type) &&
+				if (/(?:^|\s)mw:WikiLink\/Category(?=$|\s)/.test(type) &&
 						!node.getAttribute('data-parsoid') &&
 						otherNode.nodeName !== 'BODY')
 				{
@@ -2818,7 +2836,7 @@ WSP.tagHandlers = {
 
 WSP._serializeAttributes = function (state, token) {
 	function hasExpandedAttrs(tokType) {
-		return tokType && tokType.match(/\bmw:ExpandedAttrs\/[^\s]+/);
+		return (/(?:^|\s)mw:ExpandedAttrs\/[^\s]+/).test(tokType);
 	}
 
 	var tplAttrState = { kvs: {}, ks: {}, vs: {} },
@@ -3167,11 +3185,11 @@ WSP._getDOMHandler = function(node, state, cb) {
 		typeOf = node.getAttribute( 'typeof' ) || '';
 
 	// XXX: Convert into separate handlers?
-	if (/\bmw:(?:Transclusion\b|Param\b|Extension\/[^\s]+)/.test(typeOf)) {
+	if (/(?:^|\s)mw:(?:Transclusion(?=$|\s)|Param(?=$|\s)|Extension\/[^\s]+)/.test(typeOf)) {
 		return {
 			handle: function () {
 				var src, dataMW;
-				if (/\bmw:(Transclusion\b|Param\b)/.test(typeOf)) {
+				if (/(?:^|\s)mw:(Transclusion(?=$|\s)|Param(?=$|\s))/.test(typeOf)) {
 					dataMW = JSON.parse(node.getAttribute("data-mw"));
 					if (dataMW) {
 						src = state.serializer._buildTemplateWT(node,
@@ -3180,7 +3198,7 @@ WSP._getDOMHandler = function(node, state, cb) {
 						console.error("ERROR: No data-mw for: " + node.outerHTML);
 						src = dp.src;
 					}
-				} else if (/\bmw:Extension\//.test(typeOf)) {
+				} else if (/(?:^|\s)mw:Extension\//.test(typeOf)) {
 					dataMW = JSON.parse(node.getAttribute("data-mw"));
 					src = !dataMW ? dp.src : state.serializer._buildExtensionWT(state, node, dataMW);
 				} else {
@@ -3470,10 +3488,10 @@ WSP.extractTemplatedAttributes = function(node, state) {
  * Collects, checks and integrates separator newline requirements to a sinple
  * min, max structure.
  */
-WSP.getSepNlConstraints = function(nodeA, sepNlsHandlerA, nodeB, sepNlsHandlerB) {
+WSP.getSepNlConstraints = function(state, nodeA, sepNlsHandlerA, nodeB, sepNlsHandlerB) {
 	var nlConstraints = { a:{}, b:{} };
 	if (sepNlsHandlerA) {
-		nlConstraints.a = sepNlsHandlerA(nodeA, nodeB);
+		nlConstraints.a = sepNlsHandlerA(nodeA, nodeB, state);
 		nlConstraints.min = nlConstraints.a.min;
 		nlConstraints.max = nlConstraints.a.max;
 	} else {
@@ -3483,7 +3501,7 @@ WSP.getSepNlConstraints = function(nodeA, sepNlsHandlerA, nodeB, sepNlsHandlerB)
 	}
 
 	if (sepNlsHandlerB) {
-		nlConstraints.b = sepNlsHandlerB(nodeB, nodeA);
+		nlConstraints.b = sepNlsHandlerB(nodeB, nodeA, state);
 		var cb = nlConstraints.b;
 
 		// now figure out if this conflicts with the nlConstraints so far
@@ -3651,19 +3669,19 @@ WSP.updateSeparatorConstraints = function( state, nodeA, handlerA, nodeB, handle
 		sepHandlerB = handlerB && handlerB.sepnls || {};
 	if ( nodeA.nextSibling === nodeB ) {
 		// sibling separator
-		nlConstraints = this.getSepNlConstraints(nodeA, sepHandlerA.after,
+		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.after,
 											nodeB, sepHandlerB.before);
 	} else if ( nodeB.parentNode === nodeA || dir === 'prev' ) {
 		// parent-child separator, nodeA parent of nodeB
-		nlConstraints = this.getSepNlConstraints(nodeA, sepHandlerA.firstChild,
+		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.firstChild,
 											nodeB, sepHandlerB.before);
 	} else if ( nodeA.parentNode === nodeB || dir === 'next') {
 		// parent-child separator, nodeB parent of nodeA
-		nlConstraints = this.getSepNlConstraints(nodeA, sepHandlerA.after,
+		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.after,
 											nodeB, sepHandlerB.lastChild);
 	} else {
 		// sibling separator
-		nlConstraints = this.getSepNlConstraints(nodeA, sepHandlerA.after,
+		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.after,
 											nodeB, sepHandlerB.before);
 	}
 
@@ -3966,7 +3984,7 @@ WSP._serializeNode = function( node, state, cb) {
 
 					// Skip over encapsulated content since it has already been serialized
 					var typeOf = node.getAttribute( 'typeof' ) || '';
-					if (/\bmw:(?:Transclusion\b|Param\b|Extension\/[^\s]+)/.test(typeOf)) {
+					if (/(?:^|\s)mw:(?:Transclusion(?=$|\s)|Param(?=$|\s)|Extension\/[^\s]+)/.test(typeOf)) {
 						nextNode = DU.skipOverEncapsulatedContent(node);
 					}
 				} else if (DU.onlySubtreeChanged(node, this.env) &&
@@ -4090,6 +4108,9 @@ WSP.serializeDOM = function( body, chunkCB, finalCB, selserMode ) {
 
 		// collect tpl attr tags
 		this.extractTemplatedAttributes(body, state);
+
+		// Minimize I/B tags
+		minimizeWTQuoteTags(body);
 
 		// Don't serialize the DOM if debugging is disabled
 		if (this.debugging) {

@@ -393,15 +393,17 @@ WikiConfig.prototype.getMagicPatternMatcher = function ( optionsList ) {
 
 	mwlist = [];
 	for ( ix = 0; ix < optionsList.length; ix++ ) {
+		aliases = this._interpolatedMagicWordAliases[optionsList[ix]];
+		if ( !aliases ) {
+			continue;
+		}
 		if ( ix > 0 ) {
 			regexString += '|';
 		}
-		if ( aliases = this._interpolatedMagicWordAliases[optionsList[ix]] ) {
-			regexString += aliases.join( '|' )
-				.replace( /((?:^|\|)(?:[^\$]|\$[^1])*)($|\|)/g, '$1$$1$2' )
-				.replace( /\$1/g, '(.*)' );
-			mwlist = mwlist.concat( aliases );
-		}
+		regexString += aliases.join( '|' )
+			.replace( /((?:^|\|)(?:[^\$]|\$[^1])*)($|\|)/g, '$1$$1$2' )
+			.replace( /\$1/g, '(.*)' );
+		mwlist = mwlist.concat( aliases );
 	}
 	regex = new RegExp( regexString );
 

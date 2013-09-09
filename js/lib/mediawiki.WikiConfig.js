@@ -403,7 +403,6 @@ WikiConfig.prototype.getMagicPatternMatcher = function ( optionsList ) {
 			mwlist = mwlist.concat( aliases );
 		}
 	}
-	console.log("regexString", regexString);
 	regex = new RegExp( regexString );
 
 	return function ( text ) {

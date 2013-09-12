@@ -24,7 +24,8 @@ function ExtensionHandler(manager, options) {
 
 	this.nativeExtHandlers = {
 		"ref": ref.handleRef.bind(ref, manager, options),
-		"references": references.handleReferences.bind(references, manager, options)
+		"references": references.handleReferences.bind(references, manager, options),
+		"gallery": nativeExts.gallery.handleGallery.bind(nativeExts.gallery, manager, options)
 	};
 
 	// Extension content expansion

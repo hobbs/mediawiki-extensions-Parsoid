@@ -1,0 +1,8 @@
+<gallery a=b c=d>image1.png |
+image2.gif|||||
+
+image3|
+image4    |300px| centre
+ image5.svg| http://///////
+[[x|xx]]]]
+* image6</gallery>

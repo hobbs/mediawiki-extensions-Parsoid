@@ -17,17 +17,27 @@ var Gallery = function() {
 coreutil.inherits(Gallery, ExtensionHandler);
 
 Gallery.prototype.handleGallery = function(manager, pipelineOpts, galleryToken, cb) {
-	var lines = this._getLines(galleryToken);
-	this.manager = manager;
-	this._processLines(lines, this._processLinesHandler.bind( this, galleryToken, cb ));
 	cb({ 'async': true });
 
+	this.manager = manager;
+	this.pipelineOpts = pipelineOpts;
+	this.galleryToken = galleryToken;
+	this.cb = cb;
+
+	var lines = this._getLines(galleryToken);
+
+	this._processLines(lines, this._processLinesHandler.bind(this));
 };
 
 Gallery.prototype._getLines = function(galleryToken) {
 	var outerSrc = galleryToken.getAttribute('source'),
 		tagWidths = galleryToken.dataAttribs.tagWidths,
 		innerSrc = outerSrc.substring(tagWidths[0], outerSrc.length - tagWidths[1]);
+
+	var tsr = galleryToken.dataAttribs.tsr;
+
+	this.offset = tagWidths[0] + tsr[0]
+
 	return innerSrc.split('\n');
 };
 
@@ -35,9 +45,9 @@ Gallery.prototype._processLines = function(lines, callback) {
 	async.map(lines, this._processLine.bind(this), callback);
 };
 
-Gallery.prototype._processLinesHandler = function(galleryToken, cb, err, results) {
-	var da = Util.clone(galleryToken.dataAttribs),
-		galleryOpts = Util.KVtoHash(galleryToken.getAttribute('options')),
+Gallery.prototype._processLinesHandler = function(err, results) {
+	var da = Util.clone(this.galleryToken.dataAttribs),
+		galleryOpts = Util.KVtoHash(this.galleryToken.getAttribute('options')),
 		dataMw = { 'name': 'gallery', 'attrs': galleryOpts },
 		tokens = [],
 		i;
@@ -50,25 +60,36 @@ Gallery.prototype._processLinesHandler = function(galleryToken, cb, err, results
 		tokens = tokens.concat(results[i]);
 	}
 	tokens.push(new defines.EndTagTk('div'));
-	cb({ 'tokens': tokens, 'async': false });
+	this.cb({ 'tokens': tokens, 'async': false });
 };
 
 Gallery.prototype._processLine = function(line, callback) {
 	var hasNamespace, wt;
+
+//	this.offset += 1;
+
 	if(line.trim() === '') {
 		// Usually first and last lines are empty
+		this.offset += line.length + 1;
 		callback(null, this._createPlaceholder(line));
 	} else {
 		hasNamespace = !!line.match(/^[^|]*:/)
 		wt = line;
 		if(!hasNamespace) {
 			wt = 'Image:' + wt;
+			this.offset -= 6;
 		}
-		wt = '[[' + wt + '|thumb|none]]'
+		wt = '[[' + wt + '|thumb|none]]';
+		this.offset -= 2;
 		this._processInPipeline(
 			wt,
 			this._processInPipelineHandler.bind(this, line, hasNamespace, callback)
 		);
+		if(!hasNamespace) {
+			this.offset += 6;
+		}
+		this.offset += 2;
+		this.offset += line.length + 1;
 	}
 };
 
@@ -89,8 +110,20 @@ Gallery.prototype._createDOMFragment = function(src){
 
 Gallery.prototype._processInPipeline = function(src, callback) {
 	var pipeline = this.manager.pipeFactory.getPipeline(
-		'text/x-mediawiki/full', { isInclude: true, wrapTemplates: false, inBlockToken: true }
+		'text/x-mediawiki/full', {
+			//isInclude: true,
+			//wrapTemplates: false,
+			//inBlockToken: true
+		}
 	);
+
+	pipeline.setSourceOffsets(
+		this.offset,
+		this.offset + src.length
+	);
+
+	console.log("line", this.offset, src);
+
 	pipeline.addListener('document', callback);
 	pipeline.process(src);
 };

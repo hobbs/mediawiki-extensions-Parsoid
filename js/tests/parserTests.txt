@@ -1209,8 +1209,9 @@ b
 </p><p>b
 </p>
 !! end
+
 !! test
-Block tag on one line
+Block tag on one line (<div>)
 !! input
 a <div>foo</div>
 
@@ -1222,7 +1223,19 @@ a <div>foo</div>
 !! end
 
 !! test
-Block tag on both lines
+Block tag on one line (<blockquote>)
+!! input
+a <blockquote>foo</blockquote>
+
+b
+!! result
+a <blockquote>foo</blockquote>
+<p>b
+</p>
+!! end
+
+!! test
+Block tag on both lines (<div>)
 !! input
 a <div>foo</div>
 
@@ -1230,6 +1243,18 @@ b <div>foo</div>
 !! result
 a <div>foo</div>
 b <div>foo</div>
+
+!! end
+
+!! test
+Block tag on both lines (<blockquote>)
+!! input
+a <blockquote>foo</blockquote>
+
+b <blockquote>foo</blockquote>
+!! result
+a <blockquote>foo</blockquote>
+b <blockquote>foo</blockquote>
 
 !! end
 
@@ -1359,17 +1384,61 @@ Regression with preformatted in <center>
 
 !! end
 
-# Expected output in the following test is not really expected (there should be
-# <pre> in the output) -- it's only testing for well-formedness.
 !! test
-Bug 6200: Preformatted in <blockquote>
+Bug 52763: Preformatted in <blockquote>
 !! input
 <blockquote>
  Blah
 </blockquote>
 !! result
 <blockquote>
- Blah
+<p> Blah
+</p>
+</blockquote>
+
+!! end
+
+!! test
+Bug 51086: Double newlines in blockquotes should be turned into paragraphs
+!! input
+<blockquote>
+Foo
+
+Bar
+</blockquote>
+!! result
+<blockquote>
+<p>Foo
+</p><p>Bar
+</p>
+</blockquote>
+
+!! end
+
+!! test
+Bug 15491: <ins>/<del> in blockquote
+!! input
+<blockquote>
+Foo <del>bar</del> <ins>baz</ins> quux
+</blockquote>
+!! result
+<blockquote>
+<p>Foo <del>bar</del> <ins>baz</ins> quux
+</p>
+</blockquote>
+
+!! end
+
+# Note that the p-wrapping is newline sensitive, which could be
+# considered a bug: tidy will wrap only the 'Foo' in the example
+# below in a <p> tag. (see comment 23-25 of bug #6200)
+!! test
+Bug 15491: <ins>/<del> in blockquote (2)
+!! input
+<blockquote>Foo <del>bar</del> <ins>baz</ins> quux
+</blockquote>
+!! result
+<blockquote>Foo <del>bar</del> <ins>baz</ins> quux
 </blockquote>
 
 !! end
@@ -1931,10 +2000,12 @@ c
 !!input
  <p> foo </p>
  <div> foo </div>
+ <blockquote> foo </blockquote>
  <span> foo </span>
 !!result
  <p> foo </p>
  <div> foo </div>
+ <blockquote> foo </blockquote>
 <pre><span> foo </span>
 </pre>
 !!end
@@ -1958,6 +2029,12 @@ c
  foo
 </blockquote>
 
+<blockquote>
+<pre>
+foo
+</pre>
+</blockquote>
+
 <table><tr><td>
  foo
 </td></tr></table>
@@ -1979,7 +2056,13 @@ c
 </pre>
 </center>
 <blockquote>
- foo
+<p> foo
+</p>
+</blockquote>
+<blockquote>
+<pre>
+foo
+</pre>
 </blockquote>
 <table><tr><td>
 <pre>foo
@@ -7439,8 +7522,10 @@ Templates: 1. Simple use
 Templates: 2. Inside a block tag
 !!input
 <div>{{echo|Foo}}</div>
+<blockquote>{{echo|Foo}}</blockquote>
 !!result
 <div>Foo</div>
+<blockquote>Foo</blockquote>
 
 !!end
 
@@ -13788,9 +13873,6 @@ __NOEDITSECTION__
 </p>
 !! end
 
-# Expected output in the following test is not necessarily expected (there
-# should probably be <p> tags inside the <blockquote> in the output) -- it's
-# only testing for well-formedness.
 !! test
 Bug 6200: blockquotes and paragraph formatting
 !! input
@@ -13803,7 +13885,8 @@ bar
  baz
 !! result
 <blockquote>
-foo
+<p>foo
+</p>
 </blockquote>
 <p>bar
 </p>
@@ -14483,8 +14566,6 @@ B</strong>
 # Bug 6200: <blockquote> should behave like <div> with respect to line breaks
 !! test
 Bug 6200: paragraphs inside blockquotes (no extra line breaks)
-!! options
-disabled
 !! input
 <blockquote>Line one
 
@@ -14497,8 +14578,6 @@ Line two</blockquote>
 
 !! test
 Bug 6200: paragraphs inside blockquotes (extra line break on open)
-!! options
-disabled
 !! input
 <blockquote>
 Line one
@@ -14514,8 +14593,6 @@ Line two</blockquote>
 
 !! test
 Bug 6200: paragraphs inside blockquotes (extra line break on close)
-!! options
-disabled
 !! input
 <blockquote>Line one
 
@@ -14531,8 +14608,6 @@ Line two
 
 !! test
 Bug 6200: paragraphs inside blockquotes (extra line break on open and close)
-!! options
-disabled
 !! input
 <blockquote>
 Line one
@@ -17429,6 +17504,159 @@ parsoid=wt2html
 <table></table>
 <span>ho</span>
 <table></table>
+!!end
+
+!!test
+1. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table>{{echo|foo<tr><td>bar</td></tr>}}</table>
+!!result
+<span typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;foo
+<tr>
+<td>bar</td></tr>&quot;}},&quot;i&quot;:0}},&quot;</table>&quot;]}">foo</span>
+<table>
+<tbody>
+<tr>
+<td>bar</td></tr></tbody></table>
+!!end
+
+!!test
+2. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table><div>{{echo|foo}}</div><tr><td>bar</td></tr></table>
+!!result
+<div typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>
+<div>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;foo&quot;}},&quot;i&quot;:0}},&quot;</div>
+<tr>
+<td>bar</td></tr></table>&quot;]}">foo</div>
+<table>
+<tbody>
+<tr>
+<td>bar</td></tr></tbody></table>
+!!end
+
+!!test
+3. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table><div><p>{{echo|foo</p></div><tr><td>}}bar</td></tr></table>
+!!result
+<div typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>
+<div>
+<p>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;foo</p></div>
+<tr>
+<td>&quot;}},&quot;i&quot;:0}},&quot;bar</td></tr></table>&quot;]}">
+<p>foo</p></div>
+<table>
+<tbody>
+<tr>
+<td>bar</td></tr></tbody></table>
+!!end
+
+!!test
+4. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table><div><p>{{echo|foo</p></div><tr><td>}}bar</td></tr></table>
+!!result
+<div typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>
+<div>
+<p>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;foo</p></div>
+<tr>
+<td>&quot;}},&quot;i&quot;:0}},&quot;bar</td></tr></table>&quot;]}">
+<p>foo</p></div>
+<table>
+<tbody>
+<tr>
+<td>bar</td></tr></tbody></table>
+!!end
+
+!!test
+5. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table><tr><td><div><p>{{echo|foo</p></div></td>foo}}</tr></table>
+!!result
+<span typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>
+<tr>
+<td>
+<div>
+<p>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;foo</p></div></td>foo&quot;}},&quot;i&quot;:0}},&quot;</tr></table>&quot;]}">foo</span>
+<table>
+<tbody>
+<tr>
+<td>
+<div>
+<p>foo</p></div></td></tr></tbody></table>
+!!end
+
+!!test
+6. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table><tr><td><div><p>{{echo|foo</p></div></td>foo</tr></table>}}<p>ok</p>
+!!result
+<span typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>
+<tr>
+<td>
+<div>
+<p>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;foo</p></div></td>foo</tr></table>&quot;}},&quot;i&quot;:0}}]}">foo</span>
+<table>
+<tbody>
+<tr>
+<td>
+<div>
+<p>foo</p></div></td></tr></tbody></table>
+<p>ok</p>
+!!end
+
+!!test
+7. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+<table>{{echo|<p>foo</p>}}<td>bar</td></table>
+!!result
+<p typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;
+<table>&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;
+<p>foo</p>&quot;}},&quot;i&quot;:0}},&quot;
+<td>bar</td></table>&quot;]}">foo</p>
+<table>
+<tbody>
+<tr>
+<td>bar</td></tr></tbody></table>
+!!end
+
+!!test
+8. Encapsulate foster-parented transclusion content
+!!options
+parsoid=wt2wt,wt2html
+!!input
+{{echo|a
+}}{|{{echo|style='color:red'}}
+|-
+|b
+|}
+!!result
+<p typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;1&quot;:{&quot;wt&quot;:&quot;a\n&quot;}},&quot;i&quot;:0}}]}">a</p><span typeof="mw:Transclusion" data-mw="{&quot;parts&quot;:[&quot;{|&quot;,{&quot;template&quot;:{&quot;target&quot;:{&quot;wt&quot;:&quot;echo&quot;,&quot;href&quot;:&quot;./Template:Echo&quot;},&quot;params&quot;:{&quot;style&quot;:{&quot;wt&quot;:&quot;'color:red'&quot;}},&quot;i&quot;:0}},&quot;\n|-\n|b\n|}&quot;]}">{{{1}}}</span>
+<table>
+<tbody>
+<tr>
+<td>b</td></tr></tbody></table>
 !!end
 
 # -----------------------------------------------------------------

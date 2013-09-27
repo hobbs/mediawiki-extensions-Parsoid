@@ -3186,7 +3186,7 @@ WSP._buildExtensionWT = function(state, node, dataMW) {
 		srcParts.push(attrStr);
 	}
 
-	if ( extName === 'gallery' ) {
+	if ( state.env.conf.parsoid.useNativeGallery && extName === 'gallery' ) {
 		srcParts.push(">");
 		var results = [], i, wts, wt, dp;
 		for ( var i = 0; i < node.childNodes.length; i++ ) {

@@ -151,6 +151,11 @@ ParsoidConfig.prototype.editMode = true;
  */
 ParsoidConfig.prototype.version = 0;
 
+/**
+ * @property {boolean} useNativeGallery
+ */
+ParsoidConfig.prototype.useNativeGallery = false;
+
 if (typeof module === "object") {
 	module.exports.ParsoidConfig = ParsoidConfig;
 }

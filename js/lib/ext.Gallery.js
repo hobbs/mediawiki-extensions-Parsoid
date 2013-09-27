@@ -122,8 +122,6 @@ Gallery.prototype._processInPipeline = function(src, callback) {
 		this.offset + src.length
 	);
 
-	console.log("line", this.offset, src);
-
 	pipeline.addListener('document', callback);
 	pipeline.process(src);
 };

@@ -65,13 +65,16 @@ function cleanupAndSaveDataParsoid( node ) {
 				dp.tsr = undefined;
 			}
 
+			// Remove temporary information
+			dp.tmp = undefined;
+
 			// Make dsr zero-range for fostered content
 			// to prevent selser from duplicating this content
 			// outside the table from where this came.
 			//
 			// But, do not zero it out if the node has template encapsulation
 			// information.  That will be disastrous (see bug 52638, 52488).
-			if (dp.fostered && dp.dsr && !DU.isEncapsulatedElt(node)) {
+			if (dp.fostered && dp.dsr && !DU.isFirstEncapsulationWrapperNode(node)) {
 				dp.dsr[0] = dp.dsr[1];
 			}
 		}

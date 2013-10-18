@@ -75,6 +75,9 @@ var MWParserEnvironment = function ( parsoidConfig, wikiConfig ) {
 		title: null // a full Title object
 	};
 
+	// A passed-in cookie, if any
+	this.cookie = null;
+
 	// Configuration
 	this.conf = {};
 
@@ -104,6 +107,7 @@ var MWParserEnvironment = function ( parsoidConfig, wikiConfig ) {
 
 	this.conf.wiki = wikiConfig;
 	this.conf.parsoid = parsoidConfig;
+	this.performance = {};
 
 	this.reset( this.page.name );
 
@@ -231,6 +235,7 @@ MWParserEnvironment.prototype.reset = function ( pageName ) {
 		// protocols.
 		this.page.relativeLinkPrefix = './';
 	}
+	this.performance.start = new Date().getTime();
 };
 
 MWParserEnvironment.prototype.getVariable = function( varname, options ) {
@@ -258,7 +263,7 @@ MWParserEnvironment.prototype.setVariable = function( varname, value, options ) 
  * @param {Error} cb.err
  * @param {MWParserEnvironment} cb.env The finished environment object
  */
-MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix, pageName, cb ) {
+MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix, pageName, cookie, cb ) {
 	if ( !parsoidConfig ) {
 		parsoidConfig = new ParsoidConfig();
 		parsoidConfig.setInterwiki( 'mw', 'http://www.mediawiki.org/w/api.php' );
@@ -269,6 +274,7 @@ MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix,
 	}
 
 	var env = new MWParserEnvironment( parsoidConfig, wikiConfig );
+	env.cookie = cookie;
 
 	if ( pageName ) {
 		env.reset( pageName );
@@ -278,6 +284,23 @@ MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix,
 	env.switchToConfig( prefix, function ( err ) {
 		cb( err, env );
 	} );
+};
+
+/**
+ * Build a string representing a set of parameters, suitable for use
+ * as the value of an HTTP header. Performs no escaping.
+ * @returns {string}
+ */
+MWParserEnvironment.prototype.getPerformanceHeader = function () {
+	var p = this.performance;
+
+	if ( p.start && !p.duration ) {
+		p.duration = ( new Date().getTime() ) - p.start;
+	}
+
+	return Object.keys( p ).sort().map( function ( k ) {
+		return [ k, p[k] ].join( '=' );
+	} ).join( '; ' );
 };
 
 /**

@@ -5,23 +5,13 @@
 
 "use strict";
 
-var domino = require( './domino' ),
-	async = require('async'),
+var async = require('async'),
 	$ = require( './fakejquery' ),
 	jsDiff = require( 'diff' ),
 	entities = require( 'entities' ),
 	TemplateRequest = require( './mediawiki.ApiRequest.js' ).TemplateRequest,
 	Consts = require('./mediawiki.wikitext.constants.js').WikitextConstants;
 
-/* WORKAROUND HACK to entities package, using domino. */
-// see https://github.com/fb55/node-entities/issues/8
-if ( /^0.2.[01]$/.test( require( 'entities/package.json' ).version ) ) {
-	entities.decodeHTML5 = function(data) {
-		return data.replace(/&(#\d+|#[xX][0-9a-fA-F]+|[A-Za-z]+);/g, function(e) {
-			return domino.createDocument('x'+e).body.textContent.substr(1);
-		});
-	};
-}
 
 // This is a circular dependency.  Don't use anything from defines at module
 // evaluation time.  (For example, we can't define the usual local variable
@@ -124,7 +114,7 @@ var Util = {
 	* Determine if a tag is block-level or not
 	*/
 	isBlockTag: function ( name ) {
-		return name.toUpperCase() in Consts.HTML.BlockTags;
+		return Consts.HTML.BlockTags.has( name.toUpperCase() );
 	},
 
 	/**
@@ -132,7 +122,7 @@ var Util = {
 	 * See doBlockLevels in the PHP parser (includes/parser/Parser.php)
 	 */
 	tagOpensBlockScope: function(name) {
-		return name.toUpperCase() in Consts.BlockScopeOpenTags;
+		return Consts.BlockScopeOpenTags.has( name.toUpperCase() );
 	},
 
 	/**
@@ -140,14 +130,14 @@ var Util = {
 	 * See doBlockLevels in the PHP parser (includes/parser/Parser.php)
 	 */
 	tagClosesBlockScope: function(name) {
-		return name.toUpperCase() in Consts.BlockScopeCloseTags;
+		return Consts.BlockScopeCloseTags.has( name.toUpperCase() );
 	},
 
 	/**
 	 *Determine if the named tag is void (can not have content).
 	 */
 	isVoidElement: function ( name ) {
-		return name.toUpperCase() in Consts.HTML.VoidTags;
+		return Consts.HTML.VoidTags.has( name.toUpperCase() );
 	},
 
 	/**
@@ -170,14 +160,18 @@ var Util = {
 	isTableTag: function(token) {
 		var tc = token.constructor;
 		return (tc === pd.TagTk || tc === pd.EndTagTk) &&
-			token.name.toUpperCase() in Consts.HTML.TableTags;
+			Consts.HTML.TableTags.has( token.name.toUpperCase() );
+	},
+
+	hasParsoidTypeOf: function(typeOf) {
+		return (/(^|\s)mw:[^\s]+/).test(typeOf);
 	},
 
 	isSolTransparentLinkTag: function(token) {
 		var tc = token.constructor;
 		return (tc === pd.SelfclosingTagTk || tc === pd.TagTk || tc === pd.EndTagTk) &&
 			token.name === 'link' &&
-			/mw:(WikiLink\/Category|PageProp\/redirect)/.test(token.getAttribute('rel'));
+			/mw:PageProp\/(?:Category|redirect)/.test(token.getAttribute('rel'));
 	},
 
 	isSolTransparent: function(token) {
@@ -275,6 +269,12 @@ var Util = {
 						da.targetOff += offset;
 					}
 
+					// content offsets for ext-links
+					if (offset && da.contentOffsets) {
+						da.contentOffsets[0] += offset;
+						da.contentOffsets[1] += offset;
+					}
+
 					//  Process attributes
 					if (t.attribs) {
 						for (var j = 0, m = t.attribs.length; j < m; j++) {
@@ -325,7 +325,7 @@ var Util = {
 	tokensToString: function ( tokens, strict ) {
 		var out = [];
 		// XXX: quick hack, track down non-array sources later!
-		if ( ! $.isArray( tokens ) ) {
+		if ( !Array.isArray( tokens ) ) {
 			tokens = [ tokens ];
 		}
 		for ( var i = 0, l = tokens.length; i < l; i++ ) {
@@ -704,6 +704,37 @@ var Util = {
 		return out;
 	},
 
+	/**
+	 * Creates a dom-fragment-token for processing 'content' (an array of tokens)
+	 * in its own subpipeline all the way to DOM. These tokens will be processed
+	 * by their own handler (DOMFragmentBuilder) in the last stage of the async
+	 * pipeline.
+	 *
+	 * srcOffsets should always be provided to process top-level page content in a
+	 * subpipeline. Without it, DSR computation and template wrapping cannot be done
+	 * in the subpipeline. While unpackDOMFragment can do this on unwrapping, that can
+	 * be a bit fragile and makes dom-fragments a leaky abstraction by leaking subpipeline
+	 * processing into the top-level pipeline.
+	 *
+	 * @param {Token[]} content    The array of tokens to process
+	 * @param {int[]}   srcOffsets Wikitext source offsets (start/end) of these tokens
+	 * @param {Object}  opts       Parsing options (optional)
+	 *                             opts.contextTok: The token that generated the content
+	 *                             opts.noPre: Suppress indent-pres in content
+	 */
+	getDOMFragmentToken: function(content, srcOffsets, opts) {
+		if (!opts) {
+			opts = {};
+		}
+
+		return new pd.SelfclosingTagTk('mw:dom-fragment-token', [
+			new pd.KV('contextTok', opts.token),
+			new pd.KV('content', content),
+			new pd.KV('noPre',  opts.noPre || false),
+			new pd.KV('srcOffsets', srcOffsets)
+		]);
+	},
+
 	// Does this need separate UI/content inputs?
 	formatNum: function( num ) {
 		return num + '';
@@ -797,6 +828,53 @@ var Util = {
         }
     },
 
+	processContentInPipeline: function(manager, content, opts) {
+		// Build a pipeline
+		var pipeline = manager.pipeFactory.getPipeline(
+			opts.pipelineType,
+			opts.pipelineOpts
+		);
+
+		// Set frame if necessary
+		if (opts.tplArgs) {
+			pipeline.setFrame(manager.frame, opts.tplArgs.name, opts.tplArgs.attribs);
+		}
+
+		// Set source offsets for this pipeline's content
+		if (opts.srcOffsets) {
+			pipeline.setSourceOffsets(opts.srcOffsets[0], opts.srcOffsets[1]);
+		}
+
+		// Set up provided callbacks
+		if (opts.chunkCB) {
+			pipeline.addListener('chunk', opts.chunkCB);
+		}
+		if (opts.endCB) {
+			pipeline.addListener('end', opts.endCB);
+		}
+		if (opts.documentCB) {
+			pipeline.addListener('document', opts.documentCB);
+		}
+
+		// Off the starting block ... ready, set, go!
+		pipeline.process(content, opts.tplArgs ? opts.tplArgs.cacheKey : undefined);
+	},
+
+	processAttributeToDOM: function(manager, content, cb) {
+		this.processContentInPipeline(
+			manager,
+			content.concat([new pd.EOFTk()]), {
+				pipelineType: "tokens/x-mediawiki/expanded",
+				pipelineOpts: {
+					inBlockToken: true,
+					noPre: true,
+					wrapTemplates: true
+				},
+				documentCB: cb
+			}
+		);
+	},
+
 	extractExtBody: function(extName, extTagSrc) {
 		var re = "<" + extName + "[^>]*/?>([\\s\\S]*)";
 		return extTagSrc.replace(new RegExp(re, "mi"), function() {
@@ -854,273 +932,6 @@ Util.getJSONAttribute = function ( node, attr, fallback ) {
         return fallback;
     }
 };
-
-// Separate closure for normalize functions that
-// use a singleton html parser
-( function ( Util ) {
-
-
-/**
- * Normalize a bit of source by stripping out unnecessary newlines.
- *
- * @method
- * @param {string} source
- * @returns {string}
- */
-var normalizeNewlines = function ( source ) {
-	return source
-				// strip comments first
-				.replace(/<!--(?:[^\-]|-(?!->))*-->/gm, '')
-
-				// preserve a space for non-inter-tag-whitespace
-				// non-tag content followed by non-tag content
-				.replace(/([^<> \r\n]|<\/span>)[\r\n ]+([^ \r\n<]|<span typeof="mw:)/g, '$1 $2')
-
-				// and eat all remaining newlines
-				.replace(/[\r\n]/g, '');
-};
-
-/**
- * @method normalizeOut
- *
- * Specialized normalization of the wiki parser output, mostly to ignore a few
- * known-ok differences.  If parsoidOnly is true-ish, then we allow more
- * markup through (like property and typeof attributes), for better
- * checking of parsoid-only test cases.
- *
- * @param {string} out
- * @param {bool} parsoidOnly
- * @returns {string}
- */
-var normalizeOut = function ( out, parsoidOnly ) {
-	// TODO: Do not strip newlines in pre and nowiki blocks!
-	// NOTE that we use a slightly restricted regexp for "attribute"
-	//  which works for the output of DOM serialization.  For example,
-	//  we know that attribute values will be surrounded with double quotes,
-	//  not unquoted or quoted with single quotes.  The serialization
-	//  algorithm is given by:
-	//  http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
-	if (!/[^<]*(<\w+(\s+[^\0-\cZ\s"'>\/=]+(="[^"]*")?)*\/?>[^<]*)*/.test(out)) {
-		throw new Error("normalizeOut input is not in standard serialized form");
-	}
-	if ( !parsoidOnly ) {
-		// Strip comment-and-ws-only lines that PHP parser strips out
-		out = out.replace(/\n[ \t]*<!--([^-]|-(?!->))*-->([ \t]|<!--([^-]|-(?!->))*-->)*\n/g, '\n');
-		// Ignore troublesome attributes.
-		// Strip JSON attributes like data-mw and data-parsoid early so that
-		// comment stripping in normalizeNewlines does not match unbalanced
-		// comments in wikitext source.
-		out = out.replace(/ (data-mw|data-parsoid|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content|title|class)="[^\"]*"/g, '');
-		out = normalizeNewlines( out ).
-			// remove <span typeof="....">....</span>
-			replace(/<span(?:[^>]*) typeof="mw:(?:Placeholder|Nowiki|Transclusion|Entity)"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
-			// strip typeof last
-			replace(/ typeof="[^\"]*"/g, '');
-	} else {
-		// unnecessary attributes, we don't need to check these
-		// style is in there because we should only check classes.
-		out = out.replace(/ (data-parsoid|prefix|about|rev|datatype|inlist|vocab|content|style)="[^\"]*"/g, '');
-		out = normalizeNewlines( out ).
-			// remove <span typeof="mw:Placeholder">....</span>
-			replace(/<span(?: [^>]+)* typeof="mw:Placeholder"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
-			replace(/<\/?(?:meta|link)(?: [^\0-\cZ\s"'>\/=]+(?:="[^"]*")?)*\/?>/g, '');
-	}
-	return out.
-		// replace mwt ids
-		replace(/ id="mwt\d+"/, '').
-		//.replace(/<!--.*?-->\n?/gm, '')
-		replace(/<span[^>]+about="[^"]*"[^>]*>/g, '').
-		replace(/<span><\/span>/g, '').
-		replace(/(href=")(?:\.?\.\/)+/g, '$1').
-		// replace unnecessary URL escaping
-		replace(/ href="[^"]*"/g, Util.decodeURI).
-		// strip thumbnail size prefixes
-		replace(/(src="[^"]*?)\/thumb(\/[0-9a-f]\/[0-9a-f]{2}\/[^\/]+)\/[0-9]+px-[^"\/]+(?=")/g, '$1$2').
-		replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
-};
-
-/**
- * @method normalizeHTML
- *
- * Normalize the expected parser output by parsing it using a HTML5 parser and
- * re-serializing it to HTML. Ideally, the parser would normalize inter-tag
- * whitespace for us. For now, we fake that by simply stripping all newlines.
- *
- * @param source {string}
- * @return {string}
- */
-var normalizeHTML = function ( source ) {
-	// TODO: Do not strip newlines in pre and nowiki blocks!
-	source = normalizeNewlines( source );
-	try {
-		var doc = this.parseHTML( source );
-		return doc.body
-			.innerHTML
-			// a few things we ignore for now..
-			//.replace(/\/wiki\/Main_Page/g, 'Main Page')
-			// do not expect a toc for now
-			.replace(/<div[^>]+?id="toc"[^>]*><div id="toctitle">.+?<\/div>.+?<\/div>/mg, '')
-			// do not expect section editing for now
-			.replace(/<span[^>]+class="mw-headline"[^>]*>(.*?)<\/span> *(<span class="mw-editsection"><span class="mw-editsection-bracket">\[<\/span>.*?<span class="mw-editsection-bracket">\]<\/span><\/span>)?/g, '$1')
-			// remove empty span tags
-			.replace(/<span><\/span>/g, '')
-			// general class and titles, typically on links
-			.replace(/ (title|class|rel|about|typeof)="[^"]*"/g, '')
-			// strip red link markup, we do not check if a page exists yet
-			.replace(/\/index.php\?title=([^']+?)&amp;action=edit&amp;redlink=1/g, '/wiki/$1')
-			// the expected html has some extra space in tags, strip it
-			.replace(/<a +href/g, '<a href')
-			.replace(/href="\/wiki\//g, 'href="')
-			.replace(/" +>/g, '">')
-			// parsoid always add a page name to lonely fragments
-			.replace(/href="#/g, 'href="Main Page#')
-			// replace unnecessary URL escaping
-			.replace(/ href="[^"]*"/g, Util.decodeURI)
-			// strip empty spans
-			.replace(/<span><\/span>/g, '')
-			.replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
-	} catch(e) {
-		console.log("normalizeHTML failed on" +
-		            source + " with the following error: " + e);
-		console.trace();
-		return source;
-	}
-},
-
-/**
- * @method formatHTML
- *
- * Insert newlines before some block-level start tags.
- *
- * @param {string} source
- * @returns {string}
- */
-formatHTML = function ( source ) {
-	return source.replace(
-		/(?!^)<((div|dd|dt|li|p|table|tr|td|tbody|dl|ol|ul|h1|h2|h3|h4|h5|h6)[^>]*)>/g, '\n<$1>');
-},
-
-/**
- * @method parseHTML
- *
- * Parse HTML, return the tree.
- *
- * @param {string} html
- * @returns {Node}
- */
-parseHTML = function ( html ) {
-	if(! html.match(/^<(?:!doctype|html|body)/i)) {
-		// Make sure that we parse fragments in the body. Otherwise comments,
-		// link and meta tags end up outside the html element or in the head
-		// element.
-		html = '<body>' + html;
-	}
-	return domino.createDocument(html);
-},
-
-/**
- * @method compressHTML
- *
- * Compress an HTML string by applying some smart quoting
- *
- * @param {string} html
- * @returns {string}
- */
-compressHTML = function(html) {
-	// now compress our output (and make it more readable) by using
-	// "smart quoting" of attribute values -- using single-quotes
-	// where the contents have a lot of double quotes.
-	// since the output of outerHTML is specified strictly, we know
-	// this regexp is safe. See:
-	// http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html
-	// http://www.whatwg.org/specs/web-apps/current-work/multipage/syntax.html
-	var smart_quote = function(match, name, equals, value) {
-		if (!equals) { return match; }
-		var decoded = entities.decodeHTML5(value);
-		// try re-encoding with single-quotes escaped
-		var encoded = decoded.replace(/[&'\u00A0]/g, function(c) {
-			switch(c) {
-			case '&': return '&amp;';
-			case "'": return '&#39;';
-			case '\u00A0': return '&nbsp;';
-			}
-		});
-		if (encoded.length >= value.length) { return match; /* no change */ }
-		return ' '+name+"='"+encoded+"'";
-	};
-	var process_attr_list = function(match, tag, attrs) {
-		attrs = attrs.replace(/ ([^\0-\cZ\s"'>\/=]+)(="([^"]*)")?/g,
-		                      smart_quote);
-		return tag + attrs + '>';
-	};
-	return html.replace(/(<\w+)((?: [^\0-\cZ\s"'>\/=]+(?:="[^"]*")?)+)>/g,
-	                    process_attr_list);
-},
-
-/**
- * @method serializeNode
- *
- * Serialize a HTML document.
- * The output is identical to standard DOM serialization, as given by
- * http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
- * except that we may quote attributes with single quotes, *only* where that would
- * result in more compact output than the standard double-quoted serialization.
- * Single-quoted attribute values have &amp; &#39 and &nbsp; escaped.
- *
- * @param {Node} doc
- * @returns {string}
- */
-serializeNode = function (doc, dontCompress) {
-	// use domino's outerHTML, as specified by
-	// http://domparsing.spec.whatwg.org/#outerhtml
-	var html = doc.outerHTML;
-	// technically, dom doesn't define outerHTML on a Document; that's
-	// just a convenience API defined by domino.  We can handle a
-	// more-standard DOM implementation, too.
-	if (doc.nodeName==='#document' && !html) {
-		html = doc.documentElement.outerHTML;
-	}
-	// ensure there's a doctype for documents
-	if (html &&
-	    (doc.nodeName === '#document' || /^html$/i.test(doc.nodeName)) &&
-	    ! /^\s*<!doctype/i.test(html)) {
-		html = '<!DOCTYPE html>\n' + html;
-	}
-	if (!html) {
-		// fall back to definition of outerHTML, for comments, etc:
-		// "return the result of running the HTML fragment
-		// serialization algorithm on a fictional node whose only child is
-		// the context object"
-		var fictional = doc.ownerDocument.createElement('p');
-		fictional.appendChild(doc.cloneNode());
-		html = fictional.innerHTML;
-	}
-
-	return dontCompress ? html : compressHTML(html);
-},
-
-/**
- * @method encodeXml
- *
- * Little helper function for encoding XML entities
- *
- * @param {string} string
- * @returns {string}
- */
-encodeXml = function ( string ) {
-	return entities.encodeXML(string);
-};
-
-// FIXME gwicke: define this directly
-Util.encodeXml = encodeXml;
-Util.parseHTML = parseHTML;
-Util.compressHTML = compressHTML;
-Util.serializeNode = serializeNode;
-Util.normalizeHTML = normalizeHTML;
-Util.normalizeOut = normalizeOut;
-Util.formatHTML = formatHTML;
-
-}( Util ) );
 
 ( function ( Util ) {
 
@@ -1385,7 +1196,7 @@ Util.escapeEntities = function ( text ) {
 
 Util.isHTMLElementName = function (name) {
 	name = name.toUpperCase();
-	return name in Consts.HTML.HTML5Tags || name in Consts.HTML.OlderHTMLTags;
+	return Consts.HTML.HTML5Tags.has( name ) || Consts.HTML.OlderHTMLTags.has( name );
 };
 
 /**
@@ -1400,6 +1211,14 @@ Util.isProtocolValid = function ( linkTarget, env ) {
 		return true;
 	}
 };
+
+/**
+ * Escape special regexp characters in a string used to build a regexp
+ */
+Util.escapeRegExp = function(s) {
+	return s.replace(/[\^\\$*+?.()|{}\[\]\/]/g, '\\$&');
+};
+
 
 if (typeof module === "object") {
 	module.exports.Util = Util;

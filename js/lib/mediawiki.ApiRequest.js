@@ -1,5 +1,7 @@
 "use strict";
 
+require('./core-upgrade.js');
+
 var request = require('request'),
 	$ = require( './fakejquery' ),
 	qs = require('querystring'),
@@ -108,12 +110,12 @@ ApiRequest.prototype._processListeners = function ( error, src ) {
 			nextListener.call( self, error || null, src, 'text/x-mediawiki' );
 		}
 		if ( listeners.length ) {
-			process.nextTick( processSome );
+			setImmediate( processSome );
 		}
 
 	};
 
-	process.nextTick( processSome );
+	setImmediate( processSome );
 };
 
 /**
@@ -237,6 +239,7 @@ function TemplateRequest ( env, title, oldid ) {
 		timeout: 40 * 1000, // 40 seconds
 		headers: {
 			'User-Agent': userAgent,
+			'Cookie': env.cookie,
 			'Connection': 'close'
 
 		}
@@ -368,6 +371,7 @@ function PreprocessorRequest ( env, title, text ) {
 		timeout: 16 * 1000, // 16 seconds
 		headers: {
 			'User-Agent': userAgent,
+			'Cookie': env.cookie,
 			'Connection': 'close'
 		}
 	};
@@ -468,6 +472,7 @@ function PHPParseRequest ( env, title, text ) {
 		timeout: 16 * 1000, // 16 seconds
 		headers: {
 			'User-Agent': userAgent,
+			'Cookie': env.cookie,
 			'Connection': 'close'
 		}
 	};
@@ -552,6 +557,7 @@ function ParsoidCacheRequest ( env, title, oldid, options ) {
 		timeout: 16 * 1000, // 16 seconds
 		headers: {
 			'User-Agent': userAgent,
+			'Cookie': env.cookie,
 			'Connection': 'close'
 		}
 	};
@@ -630,6 +636,7 @@ var ConfigRequest = function ( apiURI, env ) {
 		timeout: 40 * 1000,
 		headers: {
 			'User-Agent': userAgent,
+			'Cookie': env.cookie,
 			'Connection': 'close'
 		}
 	};
@@ -720,6 +727,7 @@ function ImageInfoRequest( env, filename, dims ) {
 		timeout: 40 * 1000,
 		headers: {
 			'User-Agent': userAgent,
+			'Cookie': env.cookie,
 			'Connection': 'close'
 		}
 	};

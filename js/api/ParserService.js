@@ -226,7 +226,7 @@ var roundTripDiff = function ( selser, req, res, env, document ) {
 		var headNodes = document.firstChild.firstChild.childNodes;
 		for (i = 0; i < headNodes.length; i++) {
 			if (headNodes[i].nodeName.toLowerCase() === 'base') {
-				res.write(Util.serializeNode(headNodes[i]));
+				res.write(DU.serializeNode(headNodes[i]));
 				break;
 			}
 		}
@@ -234,7 +234,7 @@ var roundTripDiff = function ( selser, req, res, env, document ) {
 		res.write( '<h2>Wikitext parsed to HTML DOM</h2><hr>\n' );
 		var bodyNodes = document.body.childNodes;
 		for (i = 0; i < bodyNodes.length; i++) {
-			res.write(Util.serializeNode(bodyNodes[i]));
+			res.write(DU.serializeNode(bodyNodes[i]));
 		}
 		res.write('\n<hr>');
 		res.write( '<h2>HTML DOM converted back to Wikitext</h2><hr>\n' );
@@ -281,7 +281,7 @@ function handleCacheRequest (env, req, cb, err, src, cacheErr, cacheSrc) {
 		return;
 	}
 	// Extract transclusion and extension content from the DOM
-	var expansions = DU.extractExpansions(Util.parseHTML(cacheSrc));
+	var expansions = DU.extractExpansions(DU.parseHTML(cacheSrc));
 
 	// Figure out what we can reuse
 	var parsoidHeader = JSON.parse(req.headers['x-parsoid'] || '{}');
@@ -370,8 +370,9 @@ app.get('/', function(req, res){
 });
 
 
-var getParserServiceEnv = function ( res, iwp, pageName, cb ) {
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, iwp || '', pageName, function ( err, env ) {
+var getParserServiceEnv = function ( res, iwp, pageName, cb, req ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, iwp || '', pageName,
+			req.headers.cookie, function ( err, env ) {
 		env.errCB = function ( e ) {
 			var errmsg = e.stack || e.toString();
 			var code = e.code || 500;
@@ -436,13 +437,13 @@ app.get(/\/_html\/(.*)/, function ( req, res ) {
 		res.end('');
 	};
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb );
+	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
 } );
 
 app.post(/\/_html\/(.*)/, function ( req, res ) {
 	var cb = function ( env ) {
 		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		var doc = Util.parseHTML(req.body.content.replace(/\r/g, ''));
+		var doc = DU.parseHTML(req.body.content.replace(/\r/g, ''));
 		res.write('<pre style="background-color: #efefef">');
 		// Always use the non-selective serializer for this mode
 		new WikitextSerializer({env: env}).serializeDOM(
@@ -459,7 +460,7 @@ app.post(/\/_html\/(.*)/, function ( req, res ) {
 			);
 	};
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb );
+	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
 } );
 
 // Form-based wikitext -> HTML DOM interface for manual testing
@@ -471,7 +472,7 @@ app.get(/\/_wikitext\/(.*)/, function ( req, res ) {
 		res.end('');
 	};
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb );
+	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
 } );
 
 app.post(/\/_wikitext\/(.*)/, function ( req, res ) {
@@ -481,10 +482,10 @@ app.post(/\/_wikitext\/(.*)/, function ( req, res ) {
 			src = req.body.content.replace(/\r/g, '');
 		parser.on('document', function ( document ) {
 			if (req.body.format==='html') {
-				res.write(Util.serializeNode(document));
+				res.write(DU.serializeNode(document));
 			} else {
 				res.write('<pre style="white-space: pre-wrap; white-space: -moz-pre-wrap; white-space: -pre-wrap; white-space: -o-pre-wrap; word-wrap: break-word;">');
-				res.write(htmlSpecialChars(document.body.innerHTML));
+				res.write(htmlSpecialChars(DU.serializeNode(document.body)));
 				res.write('</pre>');
 				res.write('<hr/>');
 				res.write(document.body.innerHTML);
@@ -511,7 +512,7 @@ app.post(/\/_wikitext\/(.*)/, function ( req, res ) {
 		}
 	};
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb );
+	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
 } );
 
 // Round-trip article testing
@@ -535,7 +536,7 @@ app.get( new RegExp('/_rt/(' + getInterwikiRE() + ')/(.*)'), function(req, res) 
 		tpr.once('src', parse.bind( tpr, env, req, res, roundTripDiff.bind( null, false ) ));
 	};
 
-	getParserServiceEnv( res, req.params[0], req.params[1], cb );
+	getParserServiceEnv( res, req.params[0], req.params[1], cb, req );
 } );
 
 // Round-trip article testing with newline stripping for editor-created HTML
@@ -558,14 +559,14 @@ app.get( new RegExp('/_rtve/(' + getInterwikiRE() + ')/(.*)') , function(req, re
 			cb = function ( req, res, src, document ) {
 				// strip newlines from the html
 				var html = document.innerHTML.replace(/[\r\n]/g, ''),
-					newDocument = Util.parseHTML(html);
+					newDocument = DU.parseHTML(html);
 				roundTripDiff( false, req, res, src, newDocument );
 			};
 
 		tpr.once('src', parse.bind( tpr, env, req, res, cb ));
 	};
 
-	getParserServiceEnv( res, req.params[0], req.params[1], cb );
+	getParserServiceEnv( res, req.params[0], req.params[1], cb, req );
 });
 
 // Round-trip article testing with selser over re-parsed HTML.
@@ -585,7 +586,7 @@ app.get( new RegExp('/_rtselser/(' + getInterwikiRE() + ')/(.*)') , function (re
 		}
 		var tpr = new TemplateRequest( env, target, oldid ),
 			tprCb = function ( req, res, src, document ) {
-				var newDocument = Util.parseHTML( document.innerHTML );
+				var newDocument = DU.parseHTML( DU.serializeNode(document) );
 				roundTripDiff( true, req, res, src, newDocument );
 			};
 
@@ -604,7 +605,7 @@ app.get(/\/_rtform\/(.*)/, function ( req, res ) {
 		res.end('');
 	};
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb );
+	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
 });
 
 app.post(/\/_rtform\/(.*)/, function ( req, res ) {
@@ -616,7 +617,7 @@ app.post(/\/_rtform\/(.*)/, function ( req, res ) {
 		});
 	};
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb );
+	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
 } );
 
 // Regular article parsing
@@ -633,17 +634,22 @@ app.get(new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function(req, res) {
 			res.send( 'no favicon yet..', 404 );
 			return;
 		}
+
+		//console.log(req.headers);
+
 		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
 
 		// Set the timeout to 900 seconds..
 		req.connection.setTimeout(900 * 1000);
 
-		var st = new Date();
 		console.log('starting parsing of ' + prefix + ':' + target);
 		var oldid = null;
-		if ( req.query.oldid ) {
+		if ( req.query.oldid && !req.headers.cookie ) {
 			oldid = req.query.oldid;
 			res.setHeader('Cache-Control', 's-maxage=2592000');
+		} else {
+			// Don't cache requests with a session or no oldid
+			res.setHeader('Cache-Control', 'private,no-cache,s-maxage=0');
 		}
 		if (env.conf.parsoid.allowCORS) {
 			// allow cross-domain requests (CORS) so that parsoid service
@@ -654,15 +660,16 @@ app.get(new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function(req, res) {
 
 		var tpr = new TemplateRequest( env, target, oldid );
 		tpr.once('src', parse.bind( null, env, req, res, function ( req, res, src, doc ) {
-			res.end(Util.serializeNode(doc.documentElement));
-			var et = new Date();
+			var out = DU.serializeNode(doc.documentElement);
+			res.setHeader('X-Parsoid-Performance', env.getPerformanceHeader());
+			res.end(out);
 			console.warn("completed parsing of " + prefix +
-				':' + target + " in " + (et - st) + " ms");
+				':' + target + " in " + env.performance.duration + " ms");
 		}));
 	};
 
 	var prefix = req.params[0];
-	getParserServiceEnv( res, prefix, req.params[1], cb );
+	getParserServiceEnv( res, prefix, req.params[1], cb, req );
 } );
 
 // Regular article serialization using POST
@@ -674,7 +681,7 @@ app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function ( req, res 
 		res.setHeader('Content-Type', 'text/x-mediawiki; charset=UTF-8');
 
 		try {
-			doc = Util.parseHTML(req.body.content);
+			doc = DU.parseHTML(req.body.content);
 		} catch ( e ) {
 			console.log( 'There was an error in the HTML5 parser! Sending it back to the editor.' );
 			env.errCB(e);
@@ -688,6 +695,7 @@ app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function ( req, res 
 				function ( chunk ) {
 					out.push(chunk);
 				}, function () {
+					res.setHeader('X-Parsoid-Performance', env.getPerformanceHeader());
 					res.write( out.join('') );
 					res.end('');
 				} );
@@ -696,7 +704,7 @@ app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function ( req, res 
 		}
 	};
 
-	getParserServiceEnv( res, req.params[0], req.params[1], cb );
+	getParserServiceEnv( res, req.params[0], req.params[1], cb, req );
 } );
 
 /**

@@ -61,7 +61,7 @@ function swap(a, b) {
  *    ==> <i>A<b>XY</b>Z</i>
  */
 function minimizeTags(node, rewriteablePair, recurse) {
-	if (DU.isEncapsulatedElt(node) || !node.firstChild) {
+	if (DU.isFirstEncapsulationWrapperNode(node) || !node.firstChild) {
 		return;
 	}
 
@@ -86,7 +86,10 @@ function minimizeTags(node, rewriteablePair, recurse) {
 
 		// If 'a' and 'b' make a rewriteable tag-pair and neither of them
 		// is an encapsulated element, we are good to go!
-		if (rewriteablePair(a, b) && !DU.isEncapsulatedElt(a) && !DU.isEncapsulatedElt(b)) {
+		if (rewriteablePair(a, b) &&
+			!DU.isFirstEncapsulationWrapperNode(a) &&
+			!DU.isFirstEncapsulationWrapperNode(b))
+		{
 			if (mergable(a, b)) {
 				a = merge(a, b);
 				// the new a's children have new siblings.  so let's look
@@ -122,8 +125,8 @@ function minimizeWTQuoteTags(node) {
 			//   FIXME: What if neither is new, but one of them is modified?
 			//   Do we want to minimize and introduce a dirty diff?
 			// - neither is an encapsulated elt
-			return a.nodeName in Consts.WTQuoteTags &&
-				b.nodeName in Consts.WTQuoteTags &&
+			return Consts.WTQuoteTags.has( a.nodeName ) &&
+				Consts.WTQuoteTags.has( b.nodeName ) &&
 				(DU.isNewElt(a) || DU.isNewElt(b));
 		}, true);
 }

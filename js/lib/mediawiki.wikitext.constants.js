@@ -1,4 +1,5 @@
 "use strict";
+require('./core-upgrade');
 /* -------------------------------------------------------------------
  * The WikitextConstant structure holds "global constants" that
  * capture properties about wikitext markup.
@@ -19,7 +20,7 @@ var WikitextConstants = {
 	// See http://en.wikipedia.org/wiki/Wikipedia:Extended_image_syntax
 	// for more information about how they are used.
 	Image: {
-		PrefixOptions: JSUtils.safeHash({
+		PrefixOptions: JSUtils.mapObject({
 			'img_link'      : 'link',
 			'img_alt'       : 'alt',
 			'img_page'      : 'page',
@@ -29,8 +30,8 @@ var WikitextConstants = {
 			'img_manualthumb': 'manualthumb'
 		}),
 		/* filled in below, based on PrefixOptions */
-		PrefixOptionsReverseMap: Object.create(null),
-		SimpleOptions: JSUtils.safeHash({
+		PrefixOptionsReverseMap: new Map(),
+		SimpleOptions: JSUtils.mapObject({
 			// halign
 			'img_left'   : 'halign',
 			'img_right'  : 'halign',
@@ -64,7 +65,7 @@ var WikitextConstants = {
 	Sanitizer: {
 		// List of whitelisted tags that can be used as raw HTML in wikitext.
 		// All other html/html-like tags will be spit out as text.
-		TagWhiteList: JSUtils.arrayToHash([
+		TagWhiteList: JSUtils.arrayToSet([
 			// In case you were wondering, explicit <a .. > HTML is NOT allowed in wikitext.
 			// That is why the <a> tag is missing from the white-list.
 			'ABBR',
@@ -88,14 +89,36 @@ var WikitextConstants = {
 	},
 
 	// These wikitext tags are composed with quote-chars
-	WTQuoteTags: JSUtils.arrayToHash(['I', 'B']),
+	WTQuoteTags: JSUtils.arrayToSet(['I', 'B']),
 
-	// Whitespace in these elements does not lead to indent-pre
-	PreSafeTags: JSUtils.arrayToHash(['BR', 'TABLE', 'TBODY', 'CAPTION', 'TR', 'TD', 'TH']),
+	// Leading whitespace on new lines in these elements does not lead to indent-pre
+	// This only applies to immediate children (while skipping past zero-wikitext tags)
+	// (Ex: content in table-cells induce indent pres)
+	WeakIndentPreSuppressingTags: JSUtils.arrayToSet([
+		'TABLE', 'TBODY', 'TR'
+	]),
+
+	// Leading whitespace on new lines in these elements does not lead to indent-pre
+	// This applies to all nested content in these tags.
+	// Ex: content in table-cells nested in blocktags do not induce indent pres
+	//
+	// These tags should match $openmatch regexp in doBlockLevels:
+	// $openmatch = preg_match( '/(?:<table|<blockquote|<h1|<h2|<h3|<h4|<h5|<h6|<pre|<tr|<p|<ul|<ol|<dl|<li|<\\/tr|<\\/td|<\\/th)/iS', $t )
+	//
+	// PHP parser handling is line-based. Our handling is DOM-children based.
+	// So, there might edge cases where behavior will be different.
+	//
+	// FIXME: <ref> extension tag is another such -- is it possible to fold them
+	// into this setup so we can get rid of the 'noPre' hack in token transformers?
+	StrongIndentPreSuppressingTags: JSUtils.arrayToSet([
+		'BLOCKQUOTE', 'PRE',
+		'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+		'UL', 'OL', 'DL', 'LI'
+	]),
 
 	// In the PHP parser, these block tags open block-tag scope
 	// See doBlockLevels in the PHP parser (includes/parser/Parser.php)
-	BlockScopeOpenTags: JSUtils.arrayToHash([
+	BlockScopeOpenTags: JSUtils.arrayToSet([
 		'P', 'TABLE', 'TR',
 		'UL', 'OL', 'LI', 'DL',
 		'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -104,7 +127,7 @@ var WikitextConstants = {
 
 	// In the PHP parser, these block tags close block-tag scope
 	// See doBlockLevels in the PHP parser (includes/parser/Parser.php)
-	BlockScopeCloseTags: JSUtils.arrayToHash([
+	BlockScopeCloseTags: JSUtils.arrayToSet([
 		'TD', 'TH'
 	]),
 
@@ -112,7 +135,7 @@ var WikitextConstants = {
 		// The list of HTML5 tags, mainly used for the identification of *non*-html tags.
 		// Non-html tags terminate otherwise tag-eating productions in the tokenizer
 		// to support potential extension tags.
-		HTML5Tags: JSUtils.arrayToHash([
+		HTML5Tags: JSUtils.arrayToSet([
 			"A", "ABBR", "ADDRESS", "AREA", "ARTICLE",
 			"ASIDE", "AUDIO", "B", "BASE", "BDI", "BDO", "BLOCKQUOTE",
 			"BODY", "BR", "BUTTON", "CANVAS", "CAPTION", "CITE", "CODE",
@@ -135,12 +158,12 @@ var WikitextConstants = {
 		// SSS FIXME: basefont is missing here, but looks like the PHP parser
 		// does not support it anyway and treats it as plain text.  So, skipping
 		// this one in Parsoid as well.
-		OlderHTMLTags: JSUtils.arrayToHash([
+		OlderHTMLTags: JSUtils.arrayToSet([
 			"STRIKE", "BIG", "CENTER", "FONT", "TT"
 		]),
 
 		// https://developer.mozilla.org/en-US/docs/HTML/Block-level_elements
-		BlockTags: JSUtils.arrayToHash([
+		BlockTags: JSUtils.arrayToSet([
 			'DIV', 'P',
 			// tables
 			'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'CAPTION', 'TH', 'TR', 'TD',
@@ -157,16 +180,18 @@ var WikitextConstants = {
 		]),
 
 		// See http://www.w3.org/html/wg/drafts/html/master/syntax.html#formatting
-		FormattingTags: JSUtils.arrayToHash([
+		FormattingTags: JSUtils.arrayToSet([
 			'A', 'B', 'BIG', 'CODE', 'EM', 'FONT', 'I', 'NOBR',
 			'S', 'SMALL', 'STRIKE', 'STRONG', 'TT', 'U'
 		]),
 
-		ListTags: JSUtils.arrayToHash(['UL', 'OL', 'DL']),
+		ListTags: JSUtils.arrayToSet(['UL', 'OL', 'DL']),
 
-		ListItemTags: JSUtils.arrayToHash(['LI', 'DD', 'DT']),
+		ListItemTags: JSUtils.arrayToSet(['LI', 'DD', 'DT']),
 
-		TableTags: JSUtils.arrayToHash([
+		FosterablePosition: JSUtils.arrayToSet(['TABLE', 'TBODY', 'TR']),
+
+		TableTags: JSUtils.arrayToSet([
 			'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'CAPTION', 'TH', 'TR', 'TD'
 		]),
 
@@ -175,7 +200,7 @@ var WikitextConstants = {
 		// We are currently treating <source> as an extension tag since this is widely
 		// used on wikipedias.  So, we dont want to treat this as a HTML tag => it cannot
 		// be a void element
-		VoidTags: JSUtils.arrayToHash([
+		VoidTags: JSUtils.arrayToSet([
 			'AREA', 'BASE', 'BR', 'COL', 'COMMAND', 'EMBED', 'HR', 'IMG',
 			'INPUT', 'KEYGEN', 'LINK', 'META', 'PARAM', /* 'SOURCE', */
 			'TRACK', 'WBR'
@@ -213,14 +238,32 @@ var WikitextConstants = {
 		"i"     : [2,2],
 		"br"    : [0,0],
 		"figure": [2,2]
-	}
+	},
+
+	// HTML tags whose wikitext equivalents are zero-width.
+	// This information is derived from WT_TagWidths and set below.
+	ZeroWidthWikitextTags: null
 };
 
+
 // Fill in reverse map of prefix options.
-Object.keys(WikitextConstants.Image.PrefixOptions).forEach(function(k) {
-	var v = WikitextConstants.Image.PrefixOptions[k];
-	WikitextConstants.Image.PrefixOptionsReverseMap[v] = k;
+WikitextConstants.Image.PrefixOptions.forEach(function(v, k) {
+	WikitextConstants.Image.PrefixOptionsReverseMap.set(v, k);
 });
+
+// Derived information from 'WT_TagWidths'
+var zeroWidthTags = [];
+Object.keys(WikitextConstants.WT_TagWidths).forEach(function(tag) {
+	// This special case can be fixed by maybe removing them WT_TagWidths.
+	// They may no longer be necessary -- to be investigated in another patch.
+	if (tag !== 'html' && tag !== 'head' && tag !== 'body') {
+		var widths = WikitextConstants.WT_TagWidths[tag];
+		if (widths[0] === 0 && widths[1] === 0) {
+			zeroWidthTags.push(tag.toUpperCase());
+		}
+	}
+});
+WikitextConstants.ZeroWidthWikitextTags = JSUtils.arrayToSet(zeroWidthTags);
 
 // Freeze constants to prevent accidental changes
 JSUtils.deepFreeze(WikitextConstants);

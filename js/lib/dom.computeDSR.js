@@ -195,8 +195,8 @@ function computeNodeDSR(env, node, s, e, dsrCorrection, traceDSR) {
 				if (DU.isElt(next) && next.data.parsoid.src &&
 					/(?:^|\s)mw:Placeholder\/StrippedTag(?=$|\s)/.test(next.getAttribute("typeof")))
 				{
-					if (next.data.parsoid.name in Consts.WTQuoteTags &&
-						child.nodeName in Consts.WTQuoteTags)
+					if (Consts.WTQuoteTags.has( next.data.parsoid.name ) &&
+						Consts.WTQuoteTags.has( child.nodeName ))
 					{
 						correction = next.data.parsoid.src.length;
 						ce += correction;
@@ -382,6 +382,11 @@ function computeNodeDSR(env, node, s, e, dsrCorrection, traceDSR) {
 					 * content.
 					 * ------------------------------------------------------------- */
 					newDsr = [ccs, cce];
+				} else if (DU.isDOMFragmentWrapper(child)) {
+					// Eliminate artificial cs/s mismatch warnings since this is
+					// just a wrapper token with the right DSR but without any
+					// nested subtree that could account for the DSR span.
+					newDsr = [ccs, cce];
 				} else {
 					newDsr = computeNodeDSR(env, child, ccs, cce, dsrCorrection, traceDSR);
 				}
@@ -519,4 +524,5 @@ function computeDSR(root, env, options) {
 
 if (typeof module === "object") {
 	module.exports.computeDSR = computeDSR;
+	module.exports.computeNodeDSR = computeNodeDSR;
 }

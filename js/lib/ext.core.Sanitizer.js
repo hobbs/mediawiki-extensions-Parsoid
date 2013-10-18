@@ -557,7 +557,7 @@ var SanitizerConstants = {
 
 		// Tags whose end tags are not accepted, but whose start /
 		// self-closing version might be legal.
-		this.noEndTagHash = { br: 1 };
+		this.noEndTagSet = JSUtils.arrayToSet(['br']);
 
 		this.validProtocolsRE = new RegExp("^(" + this.validUrlProtocols.join('|') + ")$", "i" );
 		//|/?[^/])[^\\s]+$");
@@ -609,9 +609,8 @@ Sanitizer.prototype.sanitizeTokens = function (tokens) {
 Sanitizer.prototype.getAttrWhiteList = function(tag) {
 	var awlCache = this.attrWhiteListCache;
 	if (!awlCache[tag]) {
-		awlCache[tag] = JSUtils.arrayToHash(this.constants.attrWhiteList[tag] || []);
+		awlCache[tag] = JSUtils.arrayToSet(this.constants.attrWhiteList[tag] || []);
 	}
-
 	return awlCache[tag];
 };
 
@@ -695,11 +694,11 @@ Sanitizer.prototype.onAny = function ( token ) {
 
 	var i,l,k,v,kv;
 	var attribs = token.attribs;
-	var noEndTagHash = this.constants.noEndTagHash;
+	var noEndTagSet = this.constants.noEndTagSet;
 
 	if (token.isHTMLTag && token.isHTMLTag() &&
-			(!( token.name.toUpperCase() in WikitextConstants.Sanitizer.TagWhiteList ) ||
-			  ( token.constructor === EndTagTk && noEndTagHash[token.name] )
+			(!WikitextConstants.Sanitizer.TagWhiteList.has( token.name.toUpperCase() ) ||
+			  ( token.constructor === EndTagTk && noEndTagSet.has(token.name) )
 			)
 		)
 	{ // unknown tag -- convert to plain text
@@ -750,10 +749,14 @@ Sanitizer.prototype.onAny = function ( token ) {
 			}
 
 			// Sanitize attributes
-			if (token.constructor === TagTk) {
+			if (token.constructor === TagTk || token.constructor === SelfclosingTagTk) {
 				this.sanitizeTagAttrs(newToken, attribs);
+			} else {
+				// EndTagTk, drop attributes
+				newToken.attribs = [];
 			}
 
+			//console.log('SanitizerEnd', token, newToken);
 			token = newToken;
 		}
 	}
@@ -918,7 +921,7 @@ Sanitizer.prototype.isParsoidAttr = function(k, v) {
 	//    unconditionally discard the entire attribute or process it further.
 	//    That further processing will catch and discard any dangerous
 	//    strings in the rest of the attribute
-	return k === "typeof" && /(?:^|\s)mw:.+?(?=$|\s)/.test(v) ||
+	return (/^(?:typeof|property|rel)$/).test(k) && /(?:^|\s)mw:.+?(?=$|\s)/.test(v) ||
 		k === "about" && /^#mwt\d+$/.test(v);
 };
 
@@ -962,7 +965,7 @@ Sanitizer.prototype.sanitizeTagAttrs = function(newToken, attrs) {
 			}
 
 			// If in HTML5 mode, don't block data-* attributes
-			if (!(html5Mode && k.match(/^data-/i)) && wlist[k] !== true) {
+			if (!(html5Mode && k.match(/^data-/i)) && !wlist.has(k)) {
 				newAttrs[k] = [null, origV, origK];
 				continue;
 			}

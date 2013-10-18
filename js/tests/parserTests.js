@@ -17,6 +17,7 @@ var fs = require('fs'),
 	path = require('path'),
 	colors = require('colors'),
 	Util = require( '../lib/mediawiki.Util.js' ).Util,
+	DU = require('../lib/mediawiki.DOMUtils.js').DOMUtils,
 	childProc = require('child_process'),
 	fork = childProc.fork,
 	DOMUtils = require( '../lib/mediawiki.DOMUtils.js' ).DOMUtils,
@@ -184,6 +185,11 @@ ParserTests.prototype.getOpts = function () {
 			'default': false,
 			'boolean': true
 		},
+		'changetree': {
+			description: 'Changes to apply to parsed HTML to generate new HTML to be serialized (useful with selser)',
+			'default': null,
+			'boolean': false
+		},
 		'use_source': {
 			description: 'Use original source in wt2wt tests',
 			'boolean': true,
@@ -346,7 +352,7 @@ ParserTests.prototype.getTests = function ( argv ) {
 	if( cache_file_digest === sha1 ) {
 		// cache file match our digest.
 		// Return contained object after removing first line (CACHE: <sha1>)
-		return JSON.parse( cache_content.replace( /.*\n/, '' ) );
+		return JSON.parse( cache_content.replace( /^.*\n/, '' ) );
 	} else {
 		// Write new file cache, content preprended with current digest
 		console.error( "Cache file either not present or outdated" );
@@ -393,7 +399,7 @@ ParserTests.prototype.processArticle = function( item, cb ) {
 	var norm = this.env.normalizeTitle(item.title);
 	//console.log( 'processArticle ' + norm );
 	this.articles[norm] = item.text;
-	process.nextTick( cb );
+	setImmediate( cb );
 };
 
 /**
@@ -565,6 +571,16 @@ ParserTests.prototype.applyChanges = function ( item, content, changelist, cb ) 
 
 	if (item.changes !== 0) {
 		applyChangesInternal(content, item.changes);
+	}
+
+	if (this.env.conf.parsoid.dumpFlags &&
+		this.env.conf.parsoid.dumpFlags.indexOf("dom:post-changes") !== -1)
+	{
+		console.warn("-------------------------");
+		console.warn("Change tree: " + JSON.stringify(item.changes));
+		console.warn("-------------------------");
+		console.warn("DOM with changes applied: " + content.outerHTML);
+		console.warn("-------------------------");
 	}
 
 	if (cb) {
@@ -805,7 +821,7 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 			this.env.conf.wiki.removeExtensionTag( extensions[i] );
 		}
 
-		process.nextTick( endCb );
+		setImmediate( endCb );
 	}.bind( this );
 
 	var testTasks = [];
@@ -820,7 +836,7 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 	if ( startsAtHtml ) {
 		if ( item.cachedSourceHTML === null ) {
 			testTasks.push( function ( cb ) {
-				cb( null, Util.parseHTML(item.result).body );
+				cb( null, DU.parseHTML(item.result).body );
 			} );
 		} else {
 			testTasks.push( function ( cb ) {
@@ -866,7 +882,13 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 
 	// Generate and make changes for the selser test mode
 	if ( mode === 'selser' ) {
-		testTasks.push( this.generateChanges.bind( this, options, item ) );
+		if ( options.changetree ) {
+			testTasks.push( function(content, cb) {
+				cb( null, content, JSON.parse(options.changetree) );
+			} );
+		} else {
+			testTasks.push( this.generateChanges.bind( this, options, item ) );
+		}
 		testTasks.push( this.applyChanges.bind( this, item ) );
 
 		// Save the modified DOM so we can re-test it later
@@ -905,10 +927,10 @@ ParserTests.prototype.processTest = function ( item, options, mode, endCb ) {
 ParserTests.prototype.processParsedHTML = function( item, options, mode, doc, cb ) {
 	item.time.end = Date.now();
 	// Check the result vs. the expected result.
-	this.checkHTML( item, doc.innerHTML, options, mode );
+	this.checkHTML( item, DU.serializeChildren(doc), options, mode );
 
 	// Now schedule the next test, if any
-	process.nextTick( cb );
+	setImmediate( cb );
 };
 
 /**
@@ -936,7 +958,7 @@ ParserTests.prototype.processSerializedWT = function ( item, options, mode, wiki
 	this.checkWikitext( item, wikitext, options, mode );
 
 	// Now schedule the next test, if any
-	process.nextTick( cb );
+	setImmediate( cb );
 };
 
 /**
@@ -955,20 +977,29 @@ ParserTests.prototype.printFailure = function ( title, comments, iopts, options,
 		actual, expected, expectFail, failure_only, mode, error, item ) {
 	this.stats.failedTests++;
 	this.stats.modes[mode].failedTests++;
-	this.stats.modes[mode].failList.push(title);
+	this.stats.modes[mode].failList.push({
+		title: title,
+		raw: actual.raw
+	});
 
 	var extTitle = ( title + ( mode ? ( ' (' + mode + ')' ) : '' ) ).
 		replace('\n', ' ');
 
+	var blacklisted = false;
 	if ( booleanOption( options.blacklist ) && expectFail ) {
-		if ( !booleanOption( options.quiet ) ) {
-			console.log( 'EXPECTED FAIL'.red + ': ' + extTitle.yellow );
+		// compare with remembered output
+		if ( mode === 'selser' && !options.changetree && testBlackList[title].raw !== actual.raw ) {
+			blacklisted = true;
+		} else {
+			if ( !booleanOption( options.quiet ) ) {
+				console.log( 'EXPECTED FAIL'.red + ': ' + extTitle.yellow );
+			}
+			return;
 		}
-		return;
-	} else {
-		this.stats.failedTestsUnexpected++;
-		this.stats.modes[mode].failedTestsUnexpected++;
 	}
+
+	this.stats.failedTestsUnexpected++;
+	this.stats.modes[mode].failedTestsUnexpected++;
 
 	if ( !failure_only ) {
 		console.log( '=====================================================' );
@@ -977,6 +1008,9 @@ ParserTests.prototype.printFailure = function ( title, comments, iopts, options,
 	console.log( 'UNEXPECTED FAIL'.red.inverse + ': ' + extTitle.yellow );
 
 	if ( mode === 'selser' ) {
+		if ( blacklisted ) {
+			console.log( 'Blacklisted, but the output changed!'.red + '');
+		}
 		if ( item.wt2wtPassed ) {
 			console.log( 'Even worse, the non-selser wt2wt test passed!'.red + '');
 		} else if ( actual && item.wt2wtResult !== actual.raw ) {
@@ -1060,7 +1094,7 @@ ParserTests.prototype.printSuccess = function ( title, options, mode, expectSucc
  * Print the actual and expected outputs.
  *
  * Side effect: Both objects will, after this, have 'formattedRaw' and 'formattedNormal' properties,
- * which are the result of calling Util.formatHTML() on the 'raw' and 'normal' properties.
+ * which are the result of calling DU.formatHTML() on the 'raw' and 'normal' properties.
  *
  * @param {Object} actual
  * @param {string} actual.raw
@@ -1075,19 +1109,19 @@ ParserTests.prototype.printSuccess = function ( title, options, mode, expectSucc
  */
 ParserTests.prototype.getActualExpected = function ( actual, expected, getDiff ) {
 	var returnStr = '';
-	expected.formattedRaw = expected.isWT ? expected.raw : Util.formatHTML( expected.raw );
+	expected.formattedRaw = expected.isWT ? expected.raw : DU.formatHTML( expected.raw );
 	returnStr += 'RAW EXPECTED'.cyan + ':';
 	returnStr += expected.formattedRaw + '\n';
 
-	actual.formattedRaw = actual.isWT ? actual.raw : Util.formatHTML( actual.raw );
+	actual.formattedRaw = actual.isWT ? actual.raw : DU.formatHTML( actual.raw );
 	returnStr += 'RAW RENDERED'.cyan + ':';
 	returnStr += actual.formattedRaw + '\n';
 
-	expected.formattedNormal = expected.isWT ? expected.normal : Util.formatHTML( expected.normal );
+	expected.formattedNormal = expected.isWT ? expected.normal : DU.formatHTML( expected.normal );
 	returnStr += 'NORMALIZED EXPECTED'.magenta + ':';
 	returnStr += expected.formattedNormal + '\n';
 
-	actual.formattedNormal = actual.isWT ? actual.normal : Util.formatHTML( actual.normal );
+	actual.formattedNormal = actual.isWT ? actual.normal : DU.formatHTML( actual.normal );
 	returnStr += 'NORMALIZED RENDERED'.magenta + ':';
 	returnStr += actual.formattedNormal + '\n';
 
@@ -1121,6 +1155,8 @@ ParserTests.prototype.printWhitelistEntry = function ( title, raw ) {
 };
 
 /**
+ * @param {Function} reportFailure
+ * @param {Function} reportSuccess
  * @param {string} title
  * @param {Object} time
  * @param {number} time.start
@@ -1131,8 +1167,11 @@ ParserTests.prototype.printWhitelistEntry = function ( title, raw ) {
  * @param {Object} actual
  * @param {Object} options
  * @param {string} mode
+ * @param {Object} item
+ * @param {Function} pre
+ * @param {Function} post
  */
-ParserTests.prototype.printResult = function ( title, time, comments, iopts, expected, actual, options, mode, item ) {
+function printResult( reportFailure, reportSuccess, title, time, comments, iopts, expected, actual, options, mode, item, pre, post ) {
 	var quick = booleanOption( options.quick );
 	var parsoidOnly = (iopts.parsoid !== undefined);
 
@@ -1141,13 +1180,14 @@ ParserTests.prototype.printResult = function ( title, time, comments, iopts, exp
 	}
 
 	var whitelist = false;
-	var expectFail = (testBlackList[title] || []).indexOf(mode) >= 0;
+	var tb = testBlackList[title];
+	var expectFail = ( tb ? tb.modes : [] ).indexOf( mode ) >= 0;
 	var fail = ( expected.normal !== actual.normal );
 
 	if ( fail &&
 	     booleanOption( options.whitelist ) &&
 	     title in testWhiteList &&
-	     Util.normalizeOut( testWhiteList[title], parsoidOnly ) ===  actual.normal ) {
+	     DU.normalizeOut( testWhiteList[title], parsoidOnly ) ===  actual.normal ) {
 		whitelist = true;
 		fail = false;
 	}
@@ -1162,15 +1202,20 @@ ParserTests.prototype.printResult = function ( title, time, comments, iopts, exp
 		return;
 	}
 
-	if ( fail ) {
-		options.reportFailure( title, comments, iopts, options,
-		                       actual, expected, expectFail,
-		                       quick, mode, null, item );
-	} else {
-		options.reportSuccess( title, options, mode, !expectFail,
-		                       whitelist, item );
+	if ( typeof pre === 'function' ) {
+		pre( mode, title, time );
 	}
-};
+
+	if ( fail ) {
+		reportFailure( title, comments, iopts, options, actual, expected, expectFail, quick, mode, null, item );
+	} else {
+		reportSuccess( title, options, mode, !expectFail, whitelist, item );
+	}
+
+	if ( typeof post === 'function' ) {
+		post( mode );
+	}
+}
 
 /**
  * @param {Object} item
@@ -1181,14 +1226,14 @@ ParserTests.prototype.checkHTML = function ( item, out, options, mode ) {
 	var normalizedOut, normalizedExpected;
 	var parsoidOnly = (item.options.parsoid !== undefined);
 
-	normalizedOut = Util.normalizeOut( out, parsoidOnly );
+	normalizedOut = DU.normalizeOut( out, parsoidOnly );
 
 	if ( item.cachedNormalizedHTML === null ) {
 		if ( parsoidOnly ) {
-			var normalDOM = Util.parseHTML( item.result ).body.innerHTML;
-			normalizedExpected = Util.normalizeOut( normalDOM, parsoidOnly );
+			var normalDOM = DU.serializeChildren(DU.parseHTML( item.result ).body);
+			normalizedExpected = DU.normalizeOut( normalDOM, parsoidOnly );
 		} else {
-			normalizedExpected = Util.normalizeHTML( item.result );
+			normalizedExpected = DU.normalizeHTML( item.result );
 		}
 		item.cachedNormalizedHTML = normalizedExpected;
 	} else {
@@ -1313,6 +1358,11 @@ ParserTests.prototype.reportSummary = function ( stats ) {
 ParserTests.prototype.main = function ( options ) {
 	if ( options.help ) {
 		optimist.showHelp();
+		console.error("Additional dump options specific to parserTests script:");
+		console.error("* dom:post-changes  : Dumps DOM after applying selser changetree\n");
+		console.error("Examples");
+		console.error("$ node parserTests --selser --filter '...' --dump dom:post-changes");
+		console.error("$ node parserTests --selser --filter '...' --changetree '...' --dump dom:post-changes\n");
 		process.exit( 0 );
 	}
 	Util.setColorFlags( options );
@@ -1359,8 +1409,8 @@ ParserTests.prototype.main = function ( options ) {
 
 	if ( typeof options.reportResult !== 'function' ) {
 		// default result reporting is standard out,
-		// see ParserTests::printResult for documentation of the default.
-		options.reportResult = this.printResult.bind( this );
+		// see printResult for documentation of the default.
+		options.reportResult = printResult.bind( this, options.reportFailure, options.reportSuccess );
 	}
 
 	if ( typeof options.getDiff !== 'function' ) {
@@ -1428,7 +1478,7 @@ ParserTests.prototype.main = function ( options ) {
 	}
 
 	// Create a new parser environment
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, 'en', null, function ( err, env ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, 'en', null, null, function ( err, env ) {
 		// For posterity: err will never be non-null here, because we expect the WikiConfig
 		// to be basically empty, since the parserTests environment is very bare.
 		this.env = env;
@@ -1491,7 +1541,7 @@ ParserTests.prototype.reportStartOfTests = function () {
 ParserTests.prototype.buildTasks = function ( item, modes, options ) {
 	var tasks = [];
 	for ( var i = 0; i < modes.length; i++ ) {
-		if ( modes[i] === 'selser' && options.numchanges ) {
+		if ( modes[i] === 'selser' && options.numchanges && !options.changetree ) {
 			item.selserChangeTrees = new Array( options.numchanges );
 
 			var done = false;
@@ -1501,7 +1551,7 @@ ParserTests.prototype.buildTasks = function ( item, modes, options ) {
 				/* jshint loopfunc: true */
 				tasks.push( function ( modeIndex, changesIndex, cb ) {
 					if (done) {
-						process.nextTick( cb );
+						setImmediate( cb );
 					} else {
 						var newitem = Util.clone( item );
 						newitem.seed = changesIndex + '';
@@ -1519,7 +1569,7 @@ ParserTests.prototype.buildTasks = function ( item, modes, options ) {
 							item.cachedNormalizedHTML = newitem.cachedNormalizedHTML;
 							item.cachedResultHTML = newitem.cachedResultHTML;
 
-							process.nextTick( cb );
+							setImmediate( cb );
 						}.bind( this ) );
 					}
 				}.bind( this, i, j ) );
@@ -1618,6 +1668,10 @@ ParserTests.prototype.processCase = function ( i, options ) {
 							// expect the old value (as set in parserTest.inc:setupDatabase())
 							this.env.conf.wiki.interwikiMap.meatball.url =
 								'http://www.usemod.com/cgi-bin/mb.pl?$1';
+							// Add 'MemoryAlpha' namespace (bug 51680)
+							this.env.conf.wiki.namespaceNames['100'] = 'MemoryAlpha';
+							this.env.conf.wiki.namespaceIds.memoryalpha =
+								this.env.conf.wiki.canonicalNamespaces.memoryalpha = 100;
 
 							async.series( this.buildTasks( item, targetModes, options ),
 								nextCallback );
@@ -1667,9 +1721,13 @@ ParserTests.prototype.processCase = function ( i, options ) {
 			contents += '(start of automatically-generated section)\n';
 			modes.forEach(function(mode) {
 				contents += '\n// Blacklist for '+mode+'\n';
-				this.stats.modes[mode].failList.forEach(function(title) {
+				this.stats.modes[mode].failList.forEach(function(fail) {
 					contents += 'add('+JSON.stringify(mode)+', '+
-						JSON.stringify(title)+');\n';
+						JSON.stringify(fail.title);
+					if ( mode === "selser" ) {
+						contents += ', '+JSON.stringify(fail.raw);
+					}
+					contents += ');\n';
 				});
 				contents += '\n';
 			}.bind(this));
@@ -1722,7 +1780,7 @@ var xmlFuncs = (function () {
 	 * Get the actual and expected outputs encoded for XML output.
 	 *
 	 * Side effect: Both objects will, after this, have 'formattedRaw' and 'formattedNormal' properties,
-	 * which are the result of calling Util.formatHTML() on the 'raw' and 'normal' properties.
+	 * which are the result of calling DU.formatHTML() on the 'raw' and 'normal' properties.
 	 *
 	 * @inheritdoc ParserTests#getActualExpected.
 	 *
@@ -1731,25 +1789,25 @@ var xmlFuncs = (function () {
 	getActualExpectedXML = function ( actual, expected, getDiff ) {
 		var returnStr = '';
 
-		expected.formattedRaw = Util.formatHTML( expected.raw );
-		actual.formattedRaw = Util.formatHTML( actual.raw );
-		expected.formattedNormal = Util.formatHTML( expected.normal );
-		actual.formattedNormal = Util.formatHTML( actual.normal );
+		expected.formattedRaw = DU.formatHTML( expected.raw );
+		actual.formattedRaw = DU.formatHTML( actual.raw );
+		expected.formattedNormal = DU.formatHTML( expected.normal );
+		actual.formattedNormal = DU.formatHTML( actual.normal );
 
 		returnStr += 'RAW EXPECTED:\n';
-		returnStr += Util.encodeXml( expected.formattedRaw ) + '\n\n';
+		returnStr += DU.encodeXml( expected.formattedRaw ) + '\n\n';
 
 		returnStr += 'RAW RENDERED:\n';
-		returnStr += Util.encodeXml( actual.formattedRaw ) + '\n\n';
+		returnStr += DU.encodeXml( actual.formattedRaw ) + '\n\n';
 
 		returnStr += 'NORMALIZED EXPECTED:\n';
-		returnStr += Util.encodeXml( expected.formattedNormal ) + '\n\n';
+		returnStr += DU.encodeXml( expected.formattedNormal ) + '\n\n';
 
 		returnStr += 'NORMALIZED RENDERED:\n';
-		returnStr += Util.encodeXml( actual.formattedNormal ) + '\n\n';
+		returnStr += DU.encodeXml( actual.formattedNormal ) + '\n\n';
 
 		returnStr += 'DIFF:\n';
-		returnStr += Util.encodeXml ( getDiff( actual, expected, false ) );
+		returnStr += DU.encodeXml ( getDiff( actual, expected, false ) );
 
 		return returnStr;
 	},
@@ -1824,58 +1882,35 @@ var xmlFuncs = (function () {
 	 *
 	 * Print the result of a test in XML.
 	 *
-	 * @inheritdoc ParserTests#printResult
+	 * @inheritdoc printResult
 	 */
-	reportResultXML = function ( title, time, comments, iopts, expected, actual, options, mode, item ) {
-		var timeTotal, testcaseEle;
-		var quick = booleanOption( options.quick );
-		var parsoidOnly = (iopts.parsoid !== undefined);
+	reportResultXML = function () {
 
-		if ( mode === 'selser' ) {
-			title += ' ' + JSON.stringify( item.changes );
-		}
+		function pre( mode, title, time ) {
+			var testcaseEle;
+			testcaseEle = '<testcase name="' + DU.encodeXml( title ) + '" ';
+			testcaseEle += 'assertions="1" ';
 
-		var whitelist = false;
-		var expectFail = (testBlackList[title] || []).indexOf(mode) >= 0;
-		var fail = ( expected.normal !== actual.normal );
-
-		if ( fail &&
-		     booleanOption( options.whitelist ) &&
-		     title in testWhiteList &&
-		     Util.normalizeOut( testWhiteList[title], parsoidOnly ) ===  actual.normal ) {
-			whitelist = true;
-			fail = false;
-		}
-
-		if ( mode === 'wt2wt' ) {
-			item.wt2wtPassed = !fail;
-			item.wt2wtResult = actual.raw;
-		}
-
-		testcaseEle = '<testcase name="' + Util.encodeXml( title ) + '" ';
-		testcaseEle += 'assertions="1" ';
-
-		if ( time && time.end && time.start ) {
-			timeTotal = time.end - time.start;
-			if ( !isNaN( timeTotal ) ) {
-				testcaseEle += 'time="' + ( ( time.end - time.start ) / 1000.0 ) + '"';
+			var timeTotal;
+			if ( time && time.end && time.start ) {
+				timeTotal = time.end - time.start;
+				if ( !isNaN( timeTotal ) ) {
+					testcaseEle += 'time="' + ( ( time.end - time.start ) / 1000.0 ) + '"';
+				}
 			}
+
+			testcaseEle += '>';
+			results[mode] += testcaseEle;
 		}
 
-		testcaseEle += '>';
-
-		results[mode] += testcaseEle;
-
-		if ( fail ) {
-			reportFailureXML( title, comments, iopts, options,
-			                  actual, expected, expectFail,
-			                  quick, mode, null, item );
-		} else {
-			reportSuccessXML( title, options, mode, !expectFail,
-			                  whitelist, item );
+		function post( mode ) {
+			results[mode] += '</testcase>\n';
 		}
 
-		results[mode] += '</testcase>\n';
+		var args = Array.prototype.slice.call( arguments );
+		args = [ reportFailureXML, reportSuccessXML ].concat( args, pre, post );
+		printResult.apply( this, args );
+
 	};
 
 	return {

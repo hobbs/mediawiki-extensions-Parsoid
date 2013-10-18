@@ -5,9 +5,12 @@
  */
 
 require('./core-upgrade.js');
-var Util = require('./mediawiki.Util.js').Util,
+var domino = require( './domino' ),
+	entities = require( 'entities' ),
+	Util = require('./mediawiki.Util.js').Util,
 	Consts = require('./mediawiki.wikitext.constants.js').WikitextConstants,
-	pd = require('./mediawiki.parser.defines.js');
+	pd = require('./mediawiki.parser.defines.js'),
+	XMLSerializer = require('./XMLSerializer');
 
 // define some constructor shortcuts
 var KV = pd.KV;
@@ -47,11 +50,11 @@ var DOMUtils = {
 	},
 
 	isFormattingElt: function(node) {
-		return node && node.nodeName in Consts.HTML.FormattingTags;
+		return node && Consts.HTML.FormattingTags.has( node.nodeName );
 	},
 
 	isQuoteElt: function(node) {
-		return node && node.nodeName in Consts.WTQuoteTags;
+		return node && Consts.WTQuoteTags.has( node.nodeName );
 	},
 
 	/**
@@ -197,6 +200,9 @@ var DOMUtils = {
 	 */
 	loadDataParsoid: function(node) {
 		this.loadDataAttrib(node, 'parsoid', {});
+		if (this.isElt(node) && !node.data.parsoid.tmp) {
+			node.data.parsoid.tmp = {};
+		}
 	},
 
 	getDataParsoid: function ( n ) {
@@ -539,15 +545,15 @@ var DOMUtils = {
 	},
 
 	isFosterablePosition: function(n) {
-		return n && n.parentNode.nodeName in {TABLE:1, TBODY:1, TR:1};
+		return n && Consts.HTML.FosterablePosition.has( n.parentNode.nodeName );
 	},
 
 	isList: function(n) {
-		return n && n.nodeName in Consts.HTML.ListTags;
+		return n && Consts.HTML.ListTags.has( n.nodeName );
 	},
 
 	isListItem: function(n) {
-		return n && n.nodeName in Consts.HTML.ListItemTags;
+		return n && Consts.HTML.ListItemTags.has( n.nodeName );
 	},
 
 	isListOrListItem: function(n) {
@@ -628,10 +634,6 @@ var DOMUtils = {
 		} else {
 			return 0;
 		}
-	},
-
-	isEncapsulatedElt: function(node) {
-		return this.isElt(node) && (/(?:^|\s)mw:(?:Transclusion(?=$|\s)|Param(?=$|\s)|Extension\/[^\s]+)/).test(node.getAttribute('typeof'));
 	},
 
 	/**
@@ -930,10 +932,106 @@ var DOMUtils = {
 		return false;
 	},
 
-	migrateChildren: function(from, to) {
-		while (from.firstChild) {
-			to.appendChild(from.firstChild);
+	/**
+	 * Check if the dom-subtree rooted at node has an element with tag name 'tagName'
+	 * The root node is not checked
+	 */
+	treeHasElement: function(node, tagName) {
+		node = node.firstChild;
+		while (node) {
+			if (this.isElt(node)) {
+				if (node.nodeName === tagName || this.treeHasElement(node, tagName)) {
+					return true;
+				}
+			}
+			node = node.nextSibling;
 		}
+
+		return false;
+	},
+
+	/**
+	 * Move 'from'.childNodes to 'to' adding them before 'beforeNode'
+	 * If 'beforeNode' is null, the nodes are appended at the end.
+	 */
+	migrateChildren: function(from, to, beforeNode) {
+		if (beforeNode === undefined) {
+			beforeNode = null;
+		}
+		while (from.firstChild) {
+			to.insertBefore(from.firstChild, beforeNode);
+		}
+	},
+
+	/**
+	 * Move 'from'.childNodes to 'to' adding them before 'beforeNode'
+	 * 'from' and 'to' belong to different documents.
+	 *
+	 * If 'beforeNode' is null, the nodes are appended at the end.
+	 */
+	migrateChildrenBetweenDocs: function(from, to, beforeNode) {
+		// FIXME: For some reason, the 'deep' equivalent of this function
+		// is optional and domino does not support it.
+		function importNode(destDoc, n) {
+			var newN = destDoc.importNode(n);
+			n = n.firstChild;
+			while (n) {
+				newN.appendChild(importNode(destDoc, n));
+				n = n.nextSibling;
+			}
+			return newN;
+		}
+
+		if (beforeNode === undefined) {
+			beforeNode = null;
+		}
+
+		var n = from.firstChild,
+			destDoc = to.ownerDocument;
+		while (n) {
+			to.insertBefore(importNode(destDoc, n), beforeNode);
+			n = n.nextSibling;
+		}
+	},
+
+	/**
+	 * Is node the first wrapper element of encapsulated content?
+	 */
+	isFirstEncapsulationWrapperNode: function(node) {
+		return this.isElt(node) && (/(?:^|\s)mw:(?:Transclusion(?=$|\s)|Param(?=$|\s)|Extension\/[^\s]+)/).test(node.getAttribute('typeof'));
+	},
+
+	/**
+	 * Is node an encapsulation wrapper elt?
+	 *
+	 * All root-level nodes of generated content are considered
+	 * encapsulation wrappers and share an about-id.
+	 */
+	isEncapsulationWrapper: function(node) {
+		// True if it has an encapsulation type or while walking backwards
+		// over elts with identical about ids, we run into a node with an
+		// encapsulation type.
+		function hasRightType(n) {
+			return (/(?:^|\s)mw:(?:Transclusion(?=$|\s)|Param(?=$|\s)|Extension\/[^\s]+)/).test(n.getAttribute("typeof"));
+		}
+
+		if (!this.isElt(node)) {
+			return false;
+		}
+
+		var about = node.getAttribute('about');
+		if (!about) {
+			return false;
+		}
+
+		while (!hasRightType(node)) {
+			node = node.previousSibling;
+			if (!node || !this.isElt(node) || node.getAttribute('about') !== about) {
+				return false;
+			}
+		}
+
+		return node !== null;
 	},
 
 	/**
@@ -1032,10 +1130,7 @@ var DOMUtils = {
 
 
 		function doExtractExpansions (node) {
-			var nodes, expAccum,
-				outerHTML = function (n) {
-					return n.outerHTML;
-				};
+			var nodes, expAccum;
 
 			while (node) {
 				if (node.nodeType === node.ELEMENT_NODE) {
@@ -1067,7 +1162,9 @@ var DOMUtils = {
 						if (key) {
 							expAccum[key] = {
 								nodes: nodes,
-								html: nodes.map(outerHTML).join('')
+								html: nodes.map(function(node) {
+									return node.outerHTML;
+								}).join('')
 							};
 						}
 						node = nodes.last();
@@ -1104,11 +1201,22 @@ var DOMUtils = {
 			textCommentAccum.forEach( function(n) {
 				span.appendChild(n);
 			});
+			span.setAttribute("data-parsoid", JSON.stringify({tmp: { wrapper: true }}));
 			out.push(span);
 			textCommentAccum = [];
 		}
 
-		nodes.forEach( function(node) {
+		// Build a real array out of nodes.
+		//
+		// Operating directly on DOM child-nodes array
+		// and manipulating them by adding span wrappers
+		// changes the traversal itself
+		var nodeBuf = [];
+		for (var i = 0; i < nodes.length; i++) {
+			nodeBuf.push(nodes[i]);
+		}
+
+		nodeBuf.forEach(function(node) {
 			if (node.nodeType === node.TEXT_NODE ||
 				node.nodeType === node.COMMENT_NODE) {
 				textCommentAccum.push(node);
@@ -1136,8 +1244,14 @@ var DOMUtils = {
 		function makeWrapperForNode ( node ) {
 			var workNode;
 			if (node.nodeType === node.ELEMENT_NODE && node.childNodes.length) {
-				// create a copy of the node without children
-				workNode = node.ownerDocument.createElement(node.nodeName);
+				// Create a copy of the node without children
+				// Do not use 'A' as a wrapper node because it could
+				// end up getting nested inside another 'A' and the DOM
+				// structure can change where the wrapper tokens are not
+				// longer siblings.
+				// Ex: "[http://foo.com Bad nesting [[Here]]].
+				var wrapperName = (node.nodeName === 'A') ? 'SPAN' : node.nodeName;
+				workNode = node.ownerDocument.createElement(wrapperName);
 				// copy over attributes
 				for (var i = 0; i < node.attributes.length; i++) {
 					var attribute = node.attributes.item(i);
@@ -1198,6 +1312,114 @@ var DOMUtils = {
 		return tokens;
 	},
 
+	isDOMFragmentWrapper: function(node) {
+		var DU = this;
+
+		function hasRightType(node) {
+			return (/(?:^|\s)mw:DOMFragment(?=$|\s)/).test(node.getAttribute("typeof"));
+		}
+
+		function previousSiblingIsWrapper(sibling, about) {
+			return sibling &&
+				DU.isElt(sibling) &&
+				about === sibling.getAttribute("about") &&
+				hasRightType(sibling);
+		}
+
+		if (!DU.isElt(node)) {
+			return false;
+		}
+
+		var about = node.getAttribute("about");
+		return about && (
+			hasRightType(node) ||
+			previousSiblingIsWrapper(node.previousSibling, about)
+		);
+
+	},
+
+	encapsulateExpansionHTML: function(env, token, expansion, opts) {
+		opts = opts || {};
+
+		// Get placeholder tokens to get our subdom through the token processing
+		// stages. These will be finally unwrapped on the DOM.
+		var toks = this.getWrapperTokens(expansion.nodes),
+			firstWrapperToken = toks[0];
+
+		// Add the DOMFragment type so that we get unwrapped later.
+		firstWrapperToken.setAttribute('typeof', 'mw:DOMFragment');
+		// Assign the HTML fragment to the data-parsoid.html on the first wrapper token.
+		firstWrapperToken.dataAttribs.html = expansion.html;
+
+		// Set foreign content flag.
+		if (opts.isForeignContent) {
+			if (!firstWrapperToken.dataAttribs.tmp) {
+				firstWrapperToken.dataAttribs.tmp = {};
+			}
+			firstWrapperToken.dataAttribs.tmp.isForeignContent = true;
+		}
+
+		// Add about to all wrapper tokens, if necessary.
+		var about = opts.aboutId;
+		if (!about && !opts.noAboutId) {
+			about = env.newAboutId();
+		}
+		if (about) {
+			toks.forEach(function(tok) {
+				tok.setAttribute('about', about);
+			});
+		}
+
+		// Transfer the tsr.
+		// The first token gets the full width, the following tokens zero width.
+		var tokenTsr = token.dataAttribs ? token.dataAttribs.tsr : null;
+		if (tokenTsr) {
+			firstWrapperToken.dataAttribs.tsr = tokenTsr;
+			var endTsr = [tokenTsr[1],tokenTsr[1]];
+			for (var i = 1; i < toks.length; i++) {
+				toks[i].dataAttribs.tsr = endTsr;
+			}
+		}
+
+		return toks;
+	},
+
+	/**
+	 * Convert a HTML5 DOM into a mw:DOMFragment and generate appropriate
+	 * tokens to insert into the token stream for further processing.
+	 *
+	 * The DOMPostProcessor will unpack the fragment and insert the HTML
+	 * back into the DOM.
+	 */
+	buildDOMFragmentForTokenStream: function(token, docOrHTML, env, addAttrsCB, opts) {
+		var doc = docOrHTML.constructor === String ? this.parseHTML(docOrHTML) : docOrHTML;
+		var nodes = doc.body.childNodes;
+
+		if (nodes.length === 0) {
+			// RT extensions expanding to nothing.
+			nodes = [doc.createElement('link')];
+		}
+
+		// Wrap bare text nodes into spans
+		nodes = this.addSpanWrappers(nodes);
+
+		if (addAttrsCB) {
+			addAttrsCB(nodes[0]);
+		}
+
+		// Get placeholder tokens to get our subdom through the token processing
+		// stages. These will be finally unwrapped on the DOM.
+		return this.encapsulateExpansionHTML(
+			env,
+			token,
+			{
+				nodes: nodes,
+				html: nodes.map(function(n) { return n.outerHTML; }).join('')
+			},
+			opts
+		);
+	},
+
 	/**
 	 * Compute, when possible, the wikitext source for a node in
 	 * an environment env. Returns null if the source cannot be
@@ -1226,6 +1448,9 @@ var DOMUtils = {
 	//
 	// On other tags, a, hr, br, meta-marker tags, the tsr spans
 	// the entire DOM, not just the tag.
+	//
+	// This code is not in mediawiki.wikitext.constants.js because this
+	// information is Parsoid-implementation-specific.
 	WT_tagsWithLimitedTSR: {
 		"b" : true,
 		"i" : true,
@@ -1266,6 +1491,247 @@ var DOMUtils = {
 		return this.hasNodeName( node, "#comment" );
 	}
 
+};
+
+var XMLSerializer = new XMLSerializer();
+
+/**
+ * @method serializeNode
+ *
+ * Serialize a HTML DOM3 document to XHTML
+ * The output is identical to standard XHTML5 DOM serialization, as given by
+ * http://dev.w3.org/html5/html-xhtml-author-guide/html-xhtml-authoring-guide.html
+ * and
+ * http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
+ * except that we may quote attributes with single quotes, *only* where that would
+ * result in more compact output than the standard double-quoted serialization.
+ *
+ * @param {Node} doc
+ * @param {Object} options: flags smartQuote, innerHTML
+ * @returns {string}
+ */
+DOMUtils.serializeNode = function (doc, options) {
+	var html;
+	if (!options) {
+		options = {
+			smartQuote: true,
+			innerXML: false
+		};
+	}
+	if (doc.nodeName==='#document') {
+		html = XMLSerializer.serializeToString(doc.documentElement, options);
+	} else {
+		html = XMLSerializer.serializeToString(doc, options);
+	}
+	// ensure there's a doctype for documents
+	if (!options.innerXML && (doc.nodeName === '#document' || /^html$/i.test(doc.nodeName))) {
+		html = '<!DOCTYPE html>\n' + html;
+	}
+
+	return html;
+};
+
+/**
+ * @method serializeChildren
+ *
+ * Serialize the children of a HTML DOM3 node to XHTML
+ * The output is identical to standard XHTML5 DOM serialization, as given by
+ * http://dev.w3.org/html5/html-xhtml-author-guide/html-xhtml-authoring-guide.html
+ * and
+ * http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
+ * except that we may quote attributes with single quotes, *only* where that would
+ * result in more compact output than the standard double-quoted serialization.
+ *
+ * @param {Node} node
+ * @param {Object} options: flags smartQuote, innerHTML
+ * @returns {string}
+ */
+DOMUtils.serializeChildren = function (node, options) {
+	if (!options) {
+		options = {
+			smartQuote: true
+		};
+	}
+	options.innerXML = true;
+	return this.serializeNode(node, options);
+};
+
+/**
+ * Normalize a bit of source by stripping out unnecessary newlines.
+ * FIXME: Replace IEW newlines with spaces on the DOM!
+ *
+ * @method
+ * @param {string} source
+ * @returns {string}
+ */
+var normalizeNewlines = function ( source ) {
+	return source
+				// strip comments first
+				.replace(/<!--(?:[^\-]|-(?!->))*-->/gm, '')
+
+				// preserve a space for non-inter-tag-whitespace
+				// non-tag content followed by non-tag content
+				//.replace(/([^<> \s]|<\/span>|(?:^|>)[^<]*>)[\r\n\t ]+([^ \r\n<]|<span typeof="mw:)/gm, '$1 $2')
+
+				// and eat all remaining newlines
+				.replace(/[\r\n]/g, '');
+};
+
+/**
+ * @method normalizeHTML
+ *
+ * Normalize the expected parser output by parsing it using a HTML5 parser and
+ * re-serializing it to HTML. Ideally, the parser would normalize inter-tag
+ * whitespace for us. For now, we fake that by simply stripping all newlines.
+ *
+ * @param source {string}
+ * @return {string}
+ */
+DOMUtils.normalizeHTML = function ( source ) {
+	// TODO: Do not strip newlines in pre and nowiki blocks!
+	try {
+		var doc = this.parseHTML( source );
+		//console.log(source, normalizeNewlines(this.serializeChildren(doc.body)));
+		return normalizeNewlines(this.serializeChildren(doc.body))
+			// a few things we ignore for now..
+			//.replace(/\/wiki\/Main_Page/g, 'Main Page')
+			// do not expect a toc for now
+			.replace(/<div[^>]+?id="toc"[^>]*><div id="toctitle">.+?<\/div>.+?<\/div>/mg, '')
+			// do not expect section editing for now
+			.replace(/<span[^>]+class="mw-headline"[^>]*>(.*?)<\/span> *(<span class="mw-editsection"><span class="mw-editsection-bracket">\[<\/span>.*?<span class="mw-editsection-bracket">\]<\/span><\/span>)?/g, '$1')
+			// remove empty span tags
+			.replace(/<span><\/span>/g, '')
+			// general class and titles, typically on links
+			.replace(/ (title|class|rel|about|typeof)="[^"]*"/g, '')
+			// strip red link markup, we do not check if a page exists yet
+			.replace(/\/index.php\?title=([^']+?)&amp;action=edit&amp;redlink=1/g, '/wiki/$1')
+			// the expected html has some extra space in tags, strip it
+			.replace(/<a +href/g, '<a href')
+			.replace(/href="\/wiki\//g, 'href="')
+			.replace(/" +>/g, '">')
+			// parsoid always add a page name to lonely fragments
+			.replace(/href="#/g, 'href="Main Page#')
+			// replace unnecessary URL escaping
+			.replace(/ href="[^"]*"/g, Util.decodeURI)
+			// strip empty spans
+			.replace(/<span><\/span>/g, '')
+			.replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
+	} catch(e) {
+		console.log("normalizeHTML failed on" +
+		            source + " with the following error: " + e);
+		console.trace();
+		return source;
+	}
+};
+
+/**
+ * @method normalizeOut
+ *
+ * Specialized normalization of the wiki parser output, mostly to ignore a few
+ * known-ok differences.  If parsoidOnly is true-ish, then we allow more
+ * markup through (like property and typeof attributes), for better
+ * checking of parsoid-only test cases.
+ *
+ * @param {string} out
+ * @param {bool} parsoidOnly
+ * @returns {string}
+ */
+DOMUtils.normalizeOut = function ( out, parsoidOnly ) {
+	// TODO: Do not strip newlines in pre and nowiki blocks!
+	// NOTE that we use a slightly restricted regexp for "attribute"
+	//  which works for the output of DOM serialization.  For example,
+	//  we know that attribute values will be surrounded with double quotes,
+	//  not unquoted or quoted with single quotes.  The serialization
+	//  algorithm is given by:
+	//  http://www.whatwg.org/specs/web-apps/current-work/multipage/the-end.html#serializing-html-fragments
+	if (!/[^<]*(<\w+(\s+[^\0-\cZ\s"'>\/=]+(="[^"]*")?)*\/?>[^<]*)*/.test(out)) {
+		throw new Error("normalizeOut input is not in standard serialized form");
+	}
+	if ( !parsoidOnly ) {
+		// Strip comment-and-ws-only lines that PHP parser strips out
+		out = out.replace(/\n[ \t]*<!--([^-]|-(?!->))*-->([ \t]|<!--([^-]|-(?!->))*-->)*\n/g, '\n');
+		// Ignore troublesome attributes.
+		// Strip JSON attributes like data-mw and data-parsoid early so that
+		// comment stripping in normalizeNewlines does not match unbalanced
+		// comments in wikitext source.
+		out = out.replace(/ (data-mw|data-parsoid|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content|title|class)="[^\"]*"/g, '');
+		// single-quoted variant
+		out = out.replace(/ (data-mw|data-parsoid|resource|rel|prefix|about|rev|datatype|inlist|property|vocab|content|title|class)='[^\']*'/g, '');
+		out = normalizeNewlines( out ).
+			// remove <span typeof="....">....</span>
+			replace(/<span(?:[^>]*) typeof="mw:(?:Placeholder|Nowiki|Transclusion|Entity)"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
+			// strip typeof last
+			replace(/ typeof="[^\"]*"/g, '');
+	} else {
+		// unnecessary attributes, we don't need to check these
+		// style is in there because we should only check classes.
+		out = out.replace(/ (data-parsoid|prefix|about|rev|datatype|inlist|vocab|content|style)="[^\"]*"/g, '');
+		// single-quoted variant
+		out = out.replace(/ (data-parsoid|prefix|about|rev|datatype|inlist|vocab|content|style)='[^\']*'/g, '');
+		out = normalizeNewlines( out ).
+			// remove <span typeof="mw:Placeholder">....</span>
+			replace(/<span(?: [^>]+)* typeof="mw:Placeholder"(?: [^\0-\cZ\s\"\'>\/=]+(?:="[^"]*")?)*>((?:[^<]+|(?!<\/span).)*)<\/span>/g, '$1').
+			replace(/<\/?(?:meta|link)(?: [^\0-\cZ\s"'>\/=]+(?:="[^"]*")?)*\/?>/g, '');
+	}
+	return out.
+		// replace mwt ids
+		replace(/ id="mwt\d+"/, '').
+		//.replace(/<!--.*?-->\n?/gm, '')
+		replace(/<span[^>]+about="[^"]*"[^>]*>/g, '').
+		replace(/<span><\/span>/g, '').
+		replace(/(href=")(?:\.?\.\/)+/g, '$1').
+		// replace unnecessary URL escaping
+		replace(/ href="[^"]*"/g, Util.decodeURI).
+		// strip thumbnail size prefixes
+		replace(/(src="[^"]*?)\/thumb(\/[0-9a-f]\/[0-9a-f]{2}\/[^\/]+)\/[0-9]+px-[^"\/]+(?=")/g, '$1$2').
+		replace(/(<(table|tbody|tr|th|td|\/th|\/td)[^<>]*>)\s+/g, '$1');
+};
+
+
+
+/**
+ * @method formatHTML
+ *
+ * Insert newlines before some block-level start tags.
+ *
+ * @param {string} source
+ * @returns {string}
+ */
+DOMUtils.formatHTML = function ( source ) {
+	return source.replace(
+		/(?!^)<((div|dd|dt|li|p|table|tr|td|tbody|dl|ol|ul|h1|h2|h3|h4|h5|h6)[^>]*)>/g, '\n<$1>');
+};
+
+/**
+ * @method parseHTML
+ *
+ * Parse HTML, return the tree.
+ *
+ * @param {string} html
+ * @returns {Node}
+ */
+DOMUtils.parseHTML = function ( html ) {
+	if(! html.match(/^<(?:!doctype|html|body)/i)) {
+		// Make sure that we parse fragments in the body. Otherwise comments,
+		// link and meta tags end up outside the html element or in the head
+		// element.
+		html = '<body>' + html;
+	}
+	return domino.createDocument(html);
+};
+
+
+
+/**
+ * @method encodeXml
+ *
+ * Little helper function for encoding XML entities
+ *
+ * @param {string} string
+ * @returns {string}
+ */
+DOMUtils.encodeXml = function ( string ) {
+	return entities.encodeXML(string);
 };
 
 if (typeof module === "object") {

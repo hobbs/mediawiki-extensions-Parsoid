@@ -213,7 +213,7 @@ WEHP.hasWikitextTokens = function ( state, onNewline, options, text, linksOnly )
 			{
 				return true;
 			}
-			if (!(t.name.toUpperCase() in Consts.Sanitizer.TagWhiteList)) {
+			if (!Consts.Sanitizer.TagWhiteList.has( t.name.toUpperCase() )) {
 				continue;
 			}
 		}
@@ -278,7 +278,7 @@ WEHP.hasWikitextTokens = function ( state, onNewline, options, text, linksOnly )
 			}
 
 			// </br>!
-			if (SanitizerConstants.noEndTagHash[t.name.toLowerCase()]) {
+			if (SanitizerConstants.noEndTagSet.has( t.name.toLowerCase() )) {
 				continue;
 			}
 
@@ -575,7 +575,7 @@ WSP.escapedText = function(state, sol, origText, fullWrap) {
 	} else {
 		var buf = [],
 			inNowiki = false,
-			tokensWithoutClosingTag = JSUtils.arrayToHash([
+			tokensWithoutClosingTag = JSUtils.arrayToSet([
 				// These token types don't come with a closing tag
 				'listItem', 'td', 'tr'
 			]);
@@ -645,7 +645,7 @@ WSP.escapedText = function(state, sol, origText, fullWrap) {
 			case pd.TagTk:
 				// Treat tokens with missing tags as self-closing tokens
 				// for the purpose of minimal nowiki escaping
-				var closeNowiki = tokensWithoutClosingTag[t.name];
+				var closeNowiki = tokensWithoutClosingTag.has(t.name);
 				smartNowikier(true, closeNowiki, text.substring(tsr[0], tsr[1]), i, n);
 				sol = false;
 				break;
@@ -678,6 +678,69 @@ WSP.escapedText = function(state, sol, origText, fullWrap) {
 
 		buf.push(nls);
 		return buf.join('');
+	}
+};
+
+WSP.serializeHTML = function(opts, html) {
+	return (new WikitextSerializer(opts)).serializeDOM(DU.parseHTML(html).body);
+};
+
+WSP.getAttributeKey = function(node, key) {
+	var dataMW = node.getAttribute("data-mw");
+	if (dataMW) {
+		dataMW = JSON.parse(dataMW);
+		var tplAttrs = dataMW.attribs;
+		if (tplAttrs) {
+			// If this attribute's key is generated content,
+			// serialize HTML back to generator wikitext.
+			for (var i = 0; i < tplAttrs.length; i++) {
+				if (tplAttrs[i][0].txt === key && tplAttrs[i][0].html) {
+					return this.serializeHTML({ env: this.env, onSOL: false }, tplAttrs[i][0].html);
+				}
+			}
+		}
+	}
+
+	return key;
+};
+
+WSP.getAttributeValue = function(node, key, value) {
+	var dataMW = node.getAttribute("data-mw");
+	if (dataMW) {
+		dataMW = JSON.parse(dataMW);
+		var tplAttrs = dataMW.attribs;
+		if (tplAttrs) {
+			// If this attribute's value is generated content,
+			// serialize HTML back to generator wikitext.
+			for (var i = 0; i < tplAttrs.length; i++) {
+				if (tplAttrs[i][0].txt === key && tplAttrs[i][1].html !== null) {
+					return this.serializeHTML({ env: this.env, onSOL: false }, tplAttrs[i][1].html);
+				}
+			}
+		}
+	}
+
+	return value;
+};
+
+// Temporarily, keep this working with old-style meta tags
+// so we dont have to purge the cache. But, on cache purge,
+// we can ditch oldStyleTplAttrs and all support for it.
+WSP.serializedAttrVal = function(node, name, oldStyleTplAttrs) {
+	DU.getDataParsoid( node );
+	if ( !DU.isElt(node) || !node.data || !node.data.parsoid ) {
+		return node.getAttribute( name );
+	}
+
+	var v = this.getAttributeValue(node, name, null);
+	if (v) {
+		return {
+			value: v,
+			modified: false,
+			fromsrc: true
+		};
+	} else {
+		return DU.getAttributeShadowInfo(node, name, oldStyleTplAttrs);
 	}
 };
 
@@ -1061,7 +1124,7 @@ WSP._serializeTableTag = function ( symbol, endSymbol, state, node, wrapperUnmod
 		return state.getOrigSrc(dsr[0], dsr[0]+dsr[2]);
 	} else {
 		var token = DU.mkTagTk(node);
-		var sAttribs = this._serializeAttributes(state, token);
+		var sAttribs = this._serializeAttributes(state, node, token);
 		if (sAttribs.length > 0) {
 			// IMPORTANT: 'endSymbol !== null' NOT 'endSymbol' since the '' string
 			// is a falsy value and we want to treat it as a truthy value.
@@ -1075,7 +1138,7 @@ WSP._serializeTableTag = function ( symbol, endSymbol, state, node, wrapperUnmod
 WSP._serializeTableElement = function ( symbol, endSymbol, state, node ) {
 	var token = DU.mkTagTk(node);
 
-	var sAttribs = this._serializeAttributes(state, token);
+	var sAttribs = this._serializeAttributes(state, node, token);
 	if (sAttribs.length > 0) {
 		// IMPORTANT: 'endSymbol !== null' NOT 'endSymbol' since the '' string
 		// is a falsy value and we want to treat it as a truthy value.
@@ -1107,7 +1170,7 @@ WSP._serializeHTMLTag = function ( state, node, wrapperUnmodified ) {
 		close = ' /';
 	}
 
-	var sAttribs = this._serializeAttributes(state, token),
+	var sAttribs = this._serializeAttributes(state, node, token),
 		tokenName = da.srcTagName || token.name;
 	if (sAttribs.length > 0) {
 		return '<' + tokenName + ' ' + sAttribs + close + '>';
@@ -1191,7 +1254,7 @@ var getLinkRoundTripData = function( env, node, state ) {
 	rtData.href = href.replace( /^(\.\.?\/)+/, '' );
 
 	// Now get the target from rt data
-	rtData.target = DU.getAttributeShadowInfo(node, 'href', tplAttrs);
+	rtData.target = state.serializer.serializedAttrVal(node, 'href', tplAttrs);
 
 	// Check if the link content has been modified
 	// FIXME: This will only work with selser of course. Hard to test without
@@ -1256,7 +1319,7 @@ WSP.getLinkPrefixTailEscapes = function (linkData, node, env) {
 	};
 
 	// Categories dont need prefix/suffix nowiki-escaping
-	if (linkData.type === 'mw:WikiLink/Category' ) {
+	if (linkData.type === 'mw:PageProp/Category' ) {
 		return escapes;
 	}
 
@@ -1327,7 +1390,7 @@ WSP.handleOpt = function ( node, opt, optName, optVal, state, cb ) {
 			break;
 
 		case 'upright':
-			val = DU.getAttributeShadowInfo( imgnode, 'width' );
+			val = this.serializedAttrVal( imgnode, 'width' );
 			if ( val.modified ) {
 				val = imgnode.getAttribute( 'width' ) / imgwidth;
 			} else {
@@ -1346,7 +1409,7 @@ WSP.handleOpt = function ( node, opt, optName, optVal, state, cb ) {
 				cb( optName.replace( '$1', '' ) );
 			} else {
 				if ( optVal === null ) {
-					val = DU.getAttributeShadowInfo( imgnode.parentNode, 'href' );
+					val = this.serializedAttrVal( imgnode.parentNode, 'href' );
 					val = val.value.replace( /^(\.\.?\/)+/, '' );
 				} else {
 					val = optVal;
@@ -1365,14 +1428,14 @@ WSP.handleOpt = function ( node, opt, optName, optVal, state, cb ) {
 			break;
 
 		case 'width':
-			val = DU.getAttributeShadowInfo( imgnode, 'width' );
+			val = this.serializedAttrVal( imgnode, 'width' );
 
 			if ( dp.img.htset ) {
 				// The height was shadowed, which means we actually had a
 				// specified height. Return XxY.
 				cb( optName.replace(
 					'$1',
-					val.value + 'x' + DU.getAttributeShadowInfo( imgnode, 'height' ).value
+					val.value + 'x' + this.serializedAttrVal( imgnode, 'height' ).value
 				) );
 				break;
 			}
@@ -1386,12 +1449,12 @@ WSP.handleOpt = function ( node, opt, optName, optVal, state, cb ) {
 				break;
 			}
 
-			val = DU.getAttributeShadowInfo( imgnode, 'height' );
+			val = this.serializedAttrVal( imgnode, 'height' );
 			cb( optName.replace( '$1', val.value ) );
 			break;
 
 		case 'alt':
-			val = DU.getAttributeShadowInfo( imgnode, 'alt' );
+			val = this.serializedAttrVal( imgnode, 'alt' );
 	                // XXX FIXME: If the value does not come from
 	                // source, then we may need to escape
 	                // it.  -rsmith
@@ -1468,7 +1531,7 @@ WSP.handleImage = function ( node, state, cb ) {
 	imgnode = wrapNode.getElementsByTagName( 'img' )[0];
 
 	if ( imgnode.hasAttribute( 'resource' ) ) {
-		filename = DU.getAttributeShadowInfo( imgnode, 'resource' );
+		filename = this.serializedAttrVal( imgnode, 'resource' );
 		if ( filename.modified || !filename.value ) {
 			filename = imgnode.getAttribute( 'resource' ).replace( /^(\.\.?\/)+/, '' );
 		} else {
@@ -1497,7 +1560,7 @@ WSP.handleImage = function ( node, state, cb ) {
 		} );
 	} else if ( wrapName === 'a' && !this.hasOpt( opts, 'link' ) ) {
 		if ( wrapdp && wrapdp.sa && wrapdp.sa.href ) {
-			linkinfo = DU.getAttributeShadowInfo( wrapNode, 'href' );
+			linkinfo = this.serializedAttrVal( wrapNode, 'href' );
 
 			if ( linkinfo.modified || !linkinfo.value ) {
 				linkinfo.value = wrapNode.getAttribute( 'href' ).replace( /^(\.\.?\/)+/, '' );
@@ -1688,11 +1751,6 @@ WSP._addColonEscape = function (linkTarget, linkData) {
 	}
 };
 
-// SSS FIXME: This doesn't deal with auto-inserted start/end tags.
-// To handle that, we have to split every 'return ...' statement into
-// openTagSrc = ...; endTagSrc = ...; and at the end of the function,
-// check for autoInsertedStart and autoInsertedEnd attributes and
-// supress openTagSrc or endTagSrc appropriately.
 WSP.linkHandler = function(node, state, cb) {
 	// TODO: handle internal/external links etc using RDFa and dataAttribs
 	// Also convert unannotated html links without advanced attributes to
@@ -1710,17 +1768,60 @@ WSP.linkHandler = function(node, state, cb) {
 	if ( linkData.type !== null && linkData.target.value !== null  ) {
 		// We have a type and target info
 
-		var target = linkData.target;
+		// Temporary backwards-compatibility for types
+		if (linkData.type === 'mw:WikiLink/Category') {
+			linkData.type = 'mw:PageProp/Category';
+		} else if (linkData.type === 'mw:WikiLink/Language') {
+			linkData.type = 'mw:PageProp/Language';
+		} else if (/^mw:ExtLink\//.test(linkData.type)) {
+			linkData.type = 'mw:ExtLink';
+		}
 
-		if (/^mw:WikiLink(\/(Category|Language|Interwiki))?$/.test( linkData.type ) ||
-		    /^mw:PageProp\/redirect$/.test( linkData.type ) ) {
+		var target = linkData.target,
+			href = node.getAttribute('href') || '';
+		if (/mw.ExtLink/.test(linkData.type)) {
+			var targetVal = target.fromsrc || true ? target.value : Util.decodeURI(target.value);
+			// Check if the href matches any of our interwiki URL patterns
+				var interWikiMatch = env.conf.wiki.InterWikiMatcher.match(href);
+			if (interWikiMatch && (dp.isIW || target.modified || linkData.contentModified)) {
+				//console.log(interWikiMatch);
+				// External link that is really an interwiki link. Convert it.
+				linkData.type = 'mw:WikiLink';
+				linkData.isInterwiki = true;
+				var oldPrefix = target.value.match(/^(:?[^:]+):/);
+				if (oldPrefix &&
+						oldPrefix[1].toLowerCase() === interWikiMatch[0].toLowerCase() ||
+						// Check if the old prefix mapped to the same URL as
+						// the new one. Use the old one if that's the case.
+						// Example: [[w:Foo]] vs. [[:en:Foo]]
+						(env.conf.wiki.interwikiMap[oldPrefix[1].toLowerCase()] || {}).url ===
+						(env.conf.wiki.interwikiMap[interWikiMatch[0].replace(/^:/, '')] || {}).url
+						)
+				{
+					// Reuse old prefix capitalization
+					if (Util.decodeEntities(target.value.substr(oldPrefix[1].length+1)) !== interWikiMatch[1])
+					{
+						// Modified, update target.value.
+						target.value = oldPrefix[1] + ':' + interWikiMatch[1];
+					}
+					// Else: preserve old encoding
+					//console.log(oldPrefix[1], interWikiMatch);
+				} else {
+					target.value = interWikiMatch.join(':');
+				}
+			}
+		}
+
+		if (/^mw:WikiLink$/.test( linkData.type ) ||
+		    /^mw:PageProp\/(?:redirect|Category|Language)$/.test( linkData.type ) ) {
 			// Decode any link that did not come from the source
 			if (! target.fromsrc) {
 				target.value = Util.decodeURI(target.value);
 			}
 
 			// Special-case handling for category links
-			if ( linkData.type === 'mw:WikiLink/Category' ) {
+			if ( linkData.type === 'mw:WikiLink/Category' ||
+					linkData.type === 'mw:PageProp/Category' ) {
 				// Split target and sort key
 				var targetParts = target.value.match( /^([^#]*)#(.*)/ );
 				if ( targetParts ) {
@@ -1735,10 +1836,8 @@ WSP.linkHandler = function(node, state, cb) {
 								.replace( /%20/g, ' '),
 							dp );
 					linkData.content.string = contentParts.contentString;
-					dp.tail = contentParts.tail;
-					linkData.tail = contentParts.tail;
-					dp.prefix = contentParts.prefix;
-					linkData.prefix = contentParts.prefix;
+					dp.tail = linkData.tail = contentParts.tail;
+					dp.prefix = linkData.prefix = contentParts.prefix;
 				} else if ( dp.pipetrick ) {
 					// Handle empty sort key, which is not encoded as fragment
 					// in the LinkHandler
@@ -1748,11 +1847,11 @@ WSP.linkHandler = function(node, state, cb) {
 				}
 
 				// Special-case handling for template-affected sort keys
-				// FIXME: sort keys cannot be modified yet, but if they are we
-				// need to fully shadow the sort key.
+				// FIXME: sort keys cannot be modified yet, but if they are,
+				// we need to fully shadow the sort key.
 				//if ( ! target.modified ) {
 					// The target and source key was not modified
-					var sortKeySrc = DU.getAttributeShadowInfo(node, 'mw:sortKey', state.tplAttrs);
+					var sortKeySrc = this.serializedAttrVal(node, 'mw:sortKey', state.tplAttrs);
 					if ( sortKeySrc.value !== null ) {
 						linkData.contentNode = undefined;
 						linkData.content.string = sortKeySrc.value;
@@ -1762,7 +1861,7 @@ WSP.linkHandler = function(node, state, cb) {
 						linkData.content.fromsrc = true;
 					}
 				//}
-			} else if ( linkData.type === 'mw:WikiLink/Language' ) {
+			} else if ( linkData.type === 'mw:PageProp/Language' ) {
 				// Fix up the the content string
 				// TODO: see if linkData can be cleaner!
 				if (linkData.content.string === undefined) {
@@ -1812,9 +1911,9 @@ WSP.linkHandler = function(node, state, cb) {
 						( dp.stx !== 'piped' && !dp.pipetrick ) ),
 
 				canUsePipeTrick =
-					linkData.type === 'mw:WikiLink/Language' ||
+					linkData.type === 'mw:PageProp/Language' ||
 					contentString !== undefined &&
-					linkData.type !== 'mw:WikiLink/Category' &&
+					linkData.type !== 'mw:PageProp/Category' &&
 					(
 						Util.stripPipeTrickChars(strippedTargetValue) ===
 							contentString ||
@@ -1828,7 +1927,7 @@ WSP.linkHandler = function(node, state, cb) {
 							env.normalizeTitle(contentString) ||
 						// Interwiki links with pipetrick have their prefix
 						// stripped, so compare against a stripped version
-						( linkData.type === 'mw:WikiLink/Interwiki' &&
+						( linkData.isInterwiki &&
 						  dp.pipetrick &&
 						  env.normalizeTitle( contentString ) ===
 							target.value.replace(/^:?[a-zA-Z]+:/, '') )
@@ -1879,7 +1978,7 @@ WSP.linkHandler = function(node, state, cb) {
 				}
 
 				if ( contentSrc === '' && ! willUsePipeTrick &&
-						linkData.type !== 'mw:WikiLink/Category' ) {
+						linkData.type !== 'mw:PageProp/Category' ) {
 					// Protect empty link content from PST pipe trick
 					contentSrc = '<nowiki/>';
 				}
@@ -1891,11 +1990,12 @@ WSP.linkHandler = function(node, state, cb) {
 						linkData.tail + escapes.tail, node );
 				return;
 			}
-		} else if ( rel === 'mw:ExtLink' ) {
+		} else if ( rel === 'mw:ExtLink' || rel === 'mw:ExtLink/Numbered' ) {
 			// Get plain text content, if any
 			var contentStr = node.childNodes.length === 1 &&
 								node.firstChild.nodeType === node.TEXT_NODE &&
 								node.firstChild.nodeValue;
+			// First check if we can serialize as an URL link
 			if ( contentStr &&
 					// Can we minimize this?
 					( target.value === contentStr  ||
@@ -1906,23 +2006,39 @@ WSP.linkHandler = function(node, state, cb) {
 				// Serialize as URL link
 				cb(target.value, node);
 			} else {
+				// TODO: match vs. interwikis too
+				var extLinkResourceMatch = env.conf.wiki.ExtResourceURLPatternMatcher
+												.match(href);
 				// Fully serialize the content
 				contentStr = state.serializeChildrenToString(node,
 						this.wteHandlers.aHandler, false);
 
-				// We expect modified hrefs to be percent-encoded already, so
-				// don't need to encode them here any more. Unmodified hrefs are
-				// just using the original encoding anyway.
-				cb( '[' + target.value + ' ' + contentStr + ']', node );
+				// First check for RFC/PMID links. We rely on selser to
+				// preserve non-minimal forms.
+				if (extLinkResourceMatch && contentStr === extLinkResourceMatch.join(' ')) {
+					// link target matches and link text is RFC 1234 or
+					// PMID 1234: Serialize to that
+					cb( extLinkResourceMatch.join(' '), node );
+				// There is an interwiki for RFCs, but strangely none for
+				// PMIDs.
+				} else if (!contentStr) {
+					// serialize as auto-numbered external link
+					// [http://example.com]
+					cb( '[' + target.value + ']', node);
+				} else {
+
+					// We expect modified hrefs to be percent-encoded already, so
+					// don't need to encode them here any more. Unmodified hrefs are
+					// just using the original encoding anyway.
+					cb( '[' + target.value + ' ' + contentStr + ']', node );
+				}
 			}
-		} else if ( rel === 'mw:ExtLink/URL' ) {
-			cb( target.value, node );
-		} else if ( rel.match( /mw:ExtLink\/(?:ISBN|RFC|PMID)/ ) ) {
+		} else if ( rel.match( /mw:ExtLink\/(?:RFC|PMID)/ ) ||
+					/mw:(?:Wiki|Ext)Link\/ISBN/.test(rel) ) {
+			// FIXME: Handle RFC/PMID in generic ExtLink handler by matching prefixes!
+			// FIXME: Handle ISBN in generic WikiLink handler by looking for
+			// Special:BookSources!
 			cb( node.firstChild.nodeValue, node );
-		} else if ( rel === 'mw:ExtLink/Numbered' ) {
-			// XXX: Use shadowed href? Storing serialized tokens in
-			// data-parsoid seems to be... wrong.
-			cb( '[' + Util.tokensToString(target.value) + ']', node);
 		} else if ( /(?:^|\s)mw:Image/.test(rel) ) {
 			this.handleImage( node, state, cb );
 		} else {
@@ -1958,18 +2074,12 @@ WSP.linkHandler = function(node, state, cb) {
 			this._htmlElementHandler(node, state, cb);
 		} else {
 			// encodeURI only encodes spaces and the like
-			var href = encodeURI(node.getAttribute('href'));
-			cb( '[' + href + ' ' +
+			var hrefStr = encodeURI(node.getAttribute('href'));
+			cb( '[' + hrefStr + ' ' +
 				state.serializeChildrenToString(node, this.wteHandlers.aHandler, false) +
 				']', node );
 		}
 	}
-
-	//if ( rtinfo.type === 'wikilink' ) {
-	//	return '[[' + rtinfo.target + ']]';
-	//} else {
-	//	// external link
-	//	return '[' + rtinfo.
 };
 
 WSP.genContentSpanTypes = {
@@ -2126,7 +2236,7 @@ function wtEOL(node, otherNode) {
 function wtListEOL(node, otherNode) {
 	if (otherNode.nodeName === 'BODY' ||
 		!DU.isElt(otherNode) ||
-		DU.isEncapsulatedElt(otherNode))
+		DU.isFirstEncapsulationWrapperNode(otherNode))
 	{
 		return {min:0, max:2};
 	}
@@ -2465,11 +2575,11 @@ WSP.tagHandlers = {
 			before: function(node, otherNode, state) {
 
 				var otherNodeName = otherNode.nodeName,
-					tdOrBody = JSUtils.arrayToHash(['TD', 'BODY']);
+					tdOrBody = JSUtils.arrayToSet(['TD', 'BODY']);
 				if (node.parentNode === otherNode &&
-					DU.isListItem(otherNode) || otherNodeName in tdOrBody)
+					DU.isListItem(otherNode) || tdOrBody.has(otherNodeName))
 				{
-					if (otherNodeName in tdOrBody) {
+					if (tdOrBody.has(otherNodeName)) {
 						return {min: 0, max: 1};
 					} else {
 						return {min: 0, max: 0};
@@ -2573,7 +2683,7 @@ WSP.tagHandlers = {
 					if (out === 'categorydefaultsort') {
 						if (node.data.parsoid.src) {
 							// Use content so that VE modifications are preserved
-							var contentInfo = DU.getAttributeShadowInfo(node, "content", state.tplAttrs);
+							var contentInfo = state.serializer.serializedAttrVal(node, "content", state.tplAttrs);
 							out = node.data.parsoid.src.replace(/^([^:]+:)(.*)$/, "$1" + contentInfo.value + "}}");
 						} else {
 							console.warn('defaultsort is missing source. Rendering as DEFAULTSORT magicword');
@@ -2658,7 +2768,7 @@ WSP.tagHandlers = {
 	span: {
 		handle: function(node, state, cb) {
 			var type = node.getAttribute('typeof');
-			if (type && type in state.serializer.genContentSpanTypes) {
+			if (type && state.serializer.genContentSpanTypes[type]) {
 				if (type === 'mw:Nowiki') {
 					cb('<nowiki>', node);
 					if (node.childNodes.length === 1 && node.firstChild.nodeName === 'PRE') {
@@ -2685,7 +2795,12 @@ WSP.tagHandlers = {
 					emitEndTag('</nowiki>', node, state, cb);
 				} else if ( /(?:^|\s)mw\:(Image|Video)(\/(Frame|Frameless|Thumb))?/.test(type) ) {
 					state.serializer.handleImage( node, state, cb );
+				} else if ( /(?:^|\s)mw\:Entity/.test(type) && node.childNodes.length === 1 ) {
+					// handle a new mw:Entity (not handled by selser) by
+					// serializing its children
+					state.serializeChildren(node, cb);
 				}
+
 			} else {
 				// Fall back to plain HTML serialization for spans created
 				// by the editor
@@ -2832,7 +2947,7 @@ WSP.tagHandlers = {
 		sepnls: {
 			before: function (node, otherNode) {
 				var type = node.getAttribute('rel');
-				if (/(?:^|\s)mw:WikiLink\/Category(?=$|\s)/.test(type) &&
+				if (/(?:^|\s)mw:PageProp\/Category(?=$|\s)/.test(type) &&
 						!node.getAttribute('data-parsoid')) {
 					// Fresh category link: Serialize on its own line
 					return {min: 1};
@@ -2842,7 +2957,7 @@ WSP.tagHandlers = {
 			},
 			after: function (node, otherNode) {
 				var type = node.getAttribute('rel');
-				if (/(?:^|\s)mw:WikiLink\/Category(?=$|\s)/.test(type) &&
+				if (/(?:^|\s)mw:PageProp\/Category(?=$|\s)/.test(type) &&
 						!node.getAttribute('data-parsoid') &&
 						otherNode.nodeName !== 'BODY')
 				{
@@ -2875,7 +2990,7 @@ WSP.tagHandlers = {
 	}
 };
 
-WSP._serializeAttributes = function (state, token) {
+WSP._serializeAttributes = function (state, node, token) {
 	function hasExpandedAttrs(tokType) {
 		return (/(?:^|\s)mw:ExpandedAttrs\/[^\s]+/).test(tokType);
 	}
@@ -2898,11 +3013,15 @@ WSP._serializeAttributes = function (state, token) {
 	}
 
 	var out = [],
+		// Strip Parsoid generated values
+		keysWithParsoidValues = {
+			'about': /^#mwt\d+$/,
+			'typeof': /(^|\s)mw:[^\s]+/g
+		},
 		ignoreKeys = {
-			about: 1, // FIXME: only strip if value starts with #mw?
-			'typeof': 1, // similar: only strip values with mw: prefix
-			// The following should be filtered out earlier, but we ignore
-			// them here too just to make sure.
+			'data-mw': 1,
+			// The following should be filtered out earlier,
+			// but we ignore them here too just to make sure.
 			'data-parsoid': 1,
 			'data-ve-changed': 1,
 			'data-parsoid-changed': 1,
@@ -2915,12 +3034,25 @@ WSP._serializeAttributes = function (state, token) {
 		kv = attribs[i];
 		k = kv.k;
 
-		// Ignore about and typeof if they are template-related
+		// Unconditionally ignore
 		if (ignoreKeys[k]) {
 			continue;
 		}
 
-		if (k.length) {
+		// Strip Parsoid-values
+		//
+		// FIXME: Given that we are currently escaping about/typeof keys
+		// that show up in wikitext, we could unconditionally strip these
+		// away right now.
+		if (keysWithParsoidValues[k] && kv.v.match(keysWithParsoidValues[k])) {
+			v = kv.v.replace(keysWithParsoidValues[k], '');
+			if (v) {
+				out.push(k + '=' + '"' + v + '"');
+			}
+			continue;
+		}
+
+		if (k.length > 0) {
 			tplKV = tplAttrState.kvs[k];
 			if (tplKV) {
 				out.push(tplKV);
@@ -2933,9 +3065,17 @@ WSP._serializeAttributes = function (state, token) {
 				// Deal with k/v's that were template-generated
 				if (tplK) {
 					k = tplK;
+				} else {
+					k = this.getAttributeKey(node, k);
 				}
-				if (tplV){
+
+				if (tplV) {
 					v = tplV;
+				} else {
+					// Pass in kv.k, not k since k can potentially
+					// be original wikitext source for 'k' rather than
+					// the string value of the key.
+					v = this.getAttributeValue(node, kv.k, v);
 				}
 
 				// Remove encapsulation from protected attributes
@@ -3179,7 +3319,7 @@ WSP._buildExtensionWT = function(state, node, dataMW) {
 	if (type) {
 		extTok.addAttribute('typeof', type);
 	}
-	attrStr = this._serializeAttributes(state, extTok);
+	attrStr = this._serializeAttributes(state, node, extTok);
 
 	if (attrStr) {
 		srcParts.push(' ');
@@ -3215,7 +3355,7 @@ WSP._buildExtensionWT = function(state, node, dataMW) {
 				env: state.env,
 				extName: extName
 			});
-			srcParts.push(wts.serializeDOM(Util.parseHTML(dataMW.body.html).body));
+			srcParts.push(wts.serializeDOM(DU.parseHTML(dataMW.body.html).body));
 		} else if (dataMW.body.extsrc) {
 			srcParts.push(dataMW.body.extsrc);
 		} else {
@@ -3600,7 +3740,7 @@ WSP.getSepNlConstraints = function(state, nodeA, sepNlsHandlerA, nodeB, sepNlsHa
  * Create a separator given a (potentially empty) separator text and newline
  * constraints
  */
-WSP.makeSeparator = function(sep, node, nlConstraints, state) {
+WSP.makeSeparator = function(sep, nlConstraints, state) {
 	var origSep = sep;
 
 		// TODO: Move to Util?
@@ -3660,21 +3800,74 @@ WSP.makeSeparator = function(sep, node, nlConstraints, state) {
 	//	sep.replace(/^([^\n<]*<!--(?:[^\-]|-(?!->))*-->)?[^\n<]+/g, '$1');
 	//}
 
-	// Strip non-nl ws from last line, but preserve comments
-	// This avoids triggering indent-pres.
+	// SSS FIXME: 'nlConstraints.min > 0' only applies to nodes that have native wikitext
+	// equivalents. For HTML nodes that will be serialized as HTML tags, we have to check
+	// for indent-pre safety always. This is currently not handled by the code below and
+	// will require other fixes to handle arbitrary HTML. To be done later! See example
+	// below that fails.
 	//
-	// 'node' has min-nl constraint, but we dont know that 'node' is pre-safe.
-	// SSS FIXME: The check for 'node.nodeName in preSafeTags' should be possible
-	// at a nested level rather than just 'node'.  If 'node' is an IEW/comment,
-	// we should find the "next" (at this and and ancestor levels), the non-sep
-	// sibling and check if that node is one of these types.
-	//
-		// SSS FIXME: how is it that parentNode can be null??  is body getting here?
-	var parentName = node.parentNode && node.parentNode.nodeName;
-	if (nlConstraints.min > 0 && !(node.nodeName in Consts.PreSafeTags)) {
-		sep = sep.replace(/[^\n>]+(<!--(?:[^\-]|-(?!->))*-->[^\n]*)?$/g, '$1');
+	// Ex: "<div>foo</div>\n <span>bar</span>"
+	if (nlConstraints.min > 0 && sep.match(/[^\n<>]+(<!--(?:[^\-]|-(?!->))*-->[^\n]*)?$/g)) {
+		// 'sep' is the separator before 'nodeB' and it has leading spaces on a newline.
+		// We have to decide whether that leading space will trigger indent-pres in wikitext.
+		// The decision depends on where this separator will be emitted relative
+		// to 'nodeA' and 'nodeB'.
+
+		var isIndentPreSafe = false,
+			constraintInfo = nlConstraints.constraintInfo || {};
+
+		// Example of sibling sepType scenario:
+		// <p>foo</p>
+		//  <span>bar</span>
+		// The span will be wrapped in an indent-pre if the leading space
+		// is not stripped since span is not a block tag
+		//
+		// Example of child-parent sepType scenario:
+		// <span>foo
+		//  </span>bar
+		// The " </span>bar" will be wrapped in an indent-pre if the
+		// leading space is not stripped since span is not a block tag
+		if ((constraintInfo.sepType === 'sibling' ||
+			constraintInfo.sepType === 'child-parent') &&
+			Util.isBlockTag(constraintInfo.nodeB.nodeName))
+		{
+			isIndentPreSafe = true;
+		} else if (constraintInfo.sepType === 'parent-child') {
+			// Separator between parent node and child node
+			var node = constraintInfo.nodeA;
+
+			// Walk up past zero-wikitext width ancestors
+			while (Consts.ZeroWidthWikitextTags.has(node.nodeName)) {
+				node = node.parentNode;
+			}
+
+			// Deal with weak/strong indent-pre suppressing tags
+			if (Consts.WeakIndentPreSuppressingTags.has(node.nodeName)) {
+				isIndentPreSafe = true;
+			} else {
+				// Strong indent-pre suppressing tags suppress indent-pres
+				// in entire DOM subtree rooted at that node
+				while (node.nodeName !== 'BODY') {
+					if (Consts.StrongIndentPreSuppressingTags.has(node.nodeName)) {
+						isIndentPreSafe = true;
+					}
+					node = node.parentNode;
+				}
+			}
+		}
+
+		if (!isIndentPreSafe) {
+			// Strip non-nl ws from last line, but preserve comments.
+			// This avoids triggering indent-pres.
+			sep = sep.replace(/[^\n>]+(<!--(?:[^\-]|-(?!->))*-->[^\n]*)?$/g, '$1');
+		}
 	}
-	this.trace('makeSeparator', sep, origSep, minNls, sepNlCount, nlConstraints);
+
+	if (this.debugging) {
+		var constraints = nlConstraints;
+		constraints.constraintInfo = undefined;
+		this.trace('makeSeparator', sep, origSep, minNls, sepNlCount, constraints);
+	}
 
 	return sep;
 };
@@ -3723,24 +3916,29 @@ WSP.mergeConstraints = function (oldConstraints, newConstraints) {
  *	}
  * }
  */
-WSP.updateSeparatorConstraints = function( state, nodeA, handlerA, nodeB, handlerB, dir) {
+WSP.updateSeparatorConstraints = function( state, nodeA, handlerA, nodeB, handlerB) {
 	var nlConstraints,
 		sepHandlerA = handlerA && handlerA.sepnls || {},
-		sepHandlerB = handlerB && handlerB.sepnls || {};
+		sepHandlerB = handlerB && handlerB.sepnls || {},
+		sepType = null;
 	if ( nodeA.nextSibling === nodeB ) {
 		// sibling separator
+		sepType = "sibling";
 		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.after,
 											nodeB, sepHandlerB.before);
-	} else if ( nodeB.parentNode === nodeA || dir === 'prev' ) {
+	} else if ( nodeB.parentNode === nodeA ) {
+		sepType = "parent-child";
 		// parent-child separator, nodeA parent of nodeB
 		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.firstChild,
 											nodeB, sepHandlerB.before);
-	} else if ( nodeA.parentNode === nodeB || dir === 'next') {
+	} else if ( nodeA.parentNode === nodeB ) {
+		sepType = "child-parent";
 		// parent-child separator, nodeB parent of nodeA
 		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.after,
 											nodeB, sepHandlerB.lastChild);
 	} else {
 		// sibling separator
+		sepType = "sibling";
 		nlConstraints = this.getSepNlConstraints(state, nodeA, sepHandlerA.after,
 											nodeB, sepHandlerB.before);
 	}
@@ -3751,6 +3949,7 @@ WSP.updateSeparatorConstraints = function( state, nodeA, handlerA, nodeB, handle
 
 	if (this.debugging) {
 		this.trace('hSep', nodeA.nodeName, nodeB.nodeName,
+				sepType,
 				nlConstraints,
 				(nodeA.outerHTML || nodeA.nodeValue || '').substr(0,40),
 				(nodeB.outerHTML || nodeB.nodeValue || '').substr(0,40)
@@ -3767,6 +3966,13 @@ WSP.updateSeparatorConstraints = function( state, nodeA, handlerA, nodeB, handle
 		state.sep.constraints = nlConstraints;
 		//state.sep.lastSourceNode = state.sep.lastSourceNode || nodeA;
 	}
+
+	state.sep.constraints.constraintInfo = {
+		sepType: sepType,
+		nodeA: nodeA,
+		nodeB: nodeB
+	};
+
 	//console.log('nlConstraints', state.sep.constraints);
 };
 
@@ -3928,7 +4134,6 @@ WSP.emitSeparator = function(state, cb, node) {
 			// TODO: set modified flag if start or end node (but not both) are
 			// modified / new so that the selser can use the separator
 			sep = this.makeSeparator(state.sep.src || '',
-						origNode,
 						state.sep.constraints || {a:{},b:{}, max:0},
 						state);
 		} else {
@@ -3993,7 +4198,7 @@ WSP._serializeNode = function( node, state, cb) {
 			// to every node of a subtree (rather than an indication that some node
 			// in the subtree is modified).
 			if (state.selserMode && !state.inModifiedContent &&
-				dp && isValidDSR(dp.dsr) && (dp.dsr[1] > dp.dsr[0] || dp.fostered)) {
+				dp && isValidDSR(dp.dsr) && (dp.dsr[1] > dp.dsr[0] || dp.fostered || dp.misnested)) {
 				// To serialize from source, we need 3 things of the node:
 				// -- it should not have a diff marker
 				// -- it should have valid, usable DSR
@@ -4038,6 +4243,23 @@ WSP._serializeNode = function( node, state, cb) {
 					}
 
 					state.currNodeUnmodified = true;
+
+					// If this HTML node will disappear in wikitext because of zero width,
+					// then the separator constraints will carry over to the node's children.
+					//
+					// Since we dont recurse into 'node' in selser mode, we update the
+					// separator constraintInfo to apply to 'node' and its first child.
+					//
+					// We could clear constraintInfo altogether which would be correct (but
+					// could normalize separators and introduce dirty diffs unnecessarily).
+					if (Consts.ZeroWidthWikitextTags.has(node.nodeName) &&
+						node.childNodes.length > 0 &&
+						state.sep.constraints.constraintInfo.sepType === 'sibling')
+					{
+						state.sep.constraints.constraintInfo.sepType = 'parent-child';
+						state.sep.constraints.constraintInfo.nodeA = node;
+						state.sep.constraints.constraintInfo.nodeB = node.firstChild;
+					}
 
 					// console.warn("USED ORIG");
 					this.trace("ORIG-src:", src, '; out:', out);

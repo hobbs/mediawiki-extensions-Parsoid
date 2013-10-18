@@ -7,7 +7,6 @@
 
 var events = require('events'),
 	util = require('util'),
-	$ = require('./fakejquery'),
 	HTML5 = require('html5'),
 	domino = require('./domino'),
 	defines = require('./mediawiki.parser.defines.js'),
@@ -23,9 +22,12 @@ var CommentTk = defines.CommentTk,
 
 var FauxHTML5 = {};
 
+var gid = 0;
 
 FauxHTML5.TreeBuilder = function ( env ) {
 	events.EventEmitter.call(this);
+
+	this.uid = gid++;
 
 	// The parser we are going to emit our tokens to
 	this.parser = new HTML5.Parser({
@@ -83,14 +85,14 @@ FauxHTML5.TreeBuilder.prototype.onChunk = function ( tokens ) {
 		return;
 	}
 
-	if (this.trace) { console.warn("---- <chunk> ----"); }
+	if (this.trace) { console.warn("---- HTML-" + this.uid + ":<chunk> ----"); }
 
 	this.env.dp( 'chunk: ' + JSON.stringify( tokens, null, 2 ) );
 	for (var i = 0; i < n; i++) {
 		this.processToken(tokens[i]);
 	}
 
-	if (this.trace) { console.warn("---- </chunk> ----"); }
+	if (this.trace) { console.warn("---- HTML-" + this.uid + ":</chunk> ----"); }
 };
 
 FauxHTML5.TreeBuilder.prototype.onEnd = function ( ) {
@@ -110,14 +112,12 @@ FauxHTML5.TreeBuilder.prototype.onEnd = function ( ) {
 };
 
 FauxHTML5.TreeBuilder.prototype._att = function (maybeAttribs) {
-	var atts = [];
-	if ( maybeAttribs && $.isArray( maybeAttribs ) ) {
-		for(var i = 0, length = maybeAttribs.length; i < length; i++) {
-			var att = maybeAttribs[i];
-			atts.push({name: att.k, value: att.v});
-		}
+	if ( Array.isArray( maybeAttribs ) ) {
+		return maybeAttribs.map(function ( attr ) {
+			return { name: attr.k, value: attr.v };
+		});
 	}
-	return atts;
+	return [];
 };
 
 // Adapt the token format to internal HTML tree builder format, call the actual
@@ -208,17 +208,20 @@ FauxHTML5.TreeBuilder.prototype.processToken = function (token) {
 		case TagTk:
 			tName = token.name;
 			if ( tName === "table" ) {
-				if ( this.trace ) {
-					console.warn('inserting foster box meta');
-				}
-				attrs = [{ name: "typeof", value: "mw:FosterBox" }];
-				if ( this.inTransclusion ) {
-					attrs.push({
-						name: "data-parsoid",
-						value: JSON.stringify({ inTransclusion: true })
+				// Don't add foster box in transclusion
+				// Avoids unnecessary insertions, the case where a table
+				// doesn't have tsr info, and the messy unbalanced table case,
+				// like the navbox
+				if ( !this.inTransclusion ) {
+					if ( this.trace ) {
+						console.warn('inserting foster box meta');
+					}
+					this.emit('token', {
+						type: 'StartTag',
+						name: 'meta',
+						data: [ { name: "typeof", value: "mw:FosterBox" } ]
 					});
 				}
-				this.emit('token', { type: 'StartTag', name: 'meta', data: attrs });
 			}
 			this.emit('token', {type: 'StartTag', name: tName, data: this._att(attribs)});
 			attrs = [];
@@ -265,11 +268,10 @@ FauxHTML5.TreeBuilder.prototype.processToken = function (token) {
 		case EndTagTk:
 			tName = token.name;
 			this.emit('token', {type: 'EndTag', name: tName});
-
 			if ( this.trace ) { console.warn('inserting shadow meta for ' + tName); }
-			attrs = this._att(attribs);
-			attrs.push({name: "typeof", value: "mw:EndTag"});
-			attrs.push({name: "data-etag", value: tName});
+			attrs = this._att( attribs );
+			attrs.push({ name: "typeof", value: "mw:EndTag" });
+			attrs.push({ name: "data-etag", value: tName });
 			this.emit('token', {type: 'Comment', data: JSON.stringify({
 				"@type": "mw:shadow",
 				attrs: attrs

@@ -7,12 +7,12 @@
 var Util = require( './mediawiki.Util.js' ).Util,
 	DU = require( './mediawiki.DOMUtils.js').DOMUtils,
 	coreutil = require('util'),
-	ExtensionHandler = require('./ext.core.ExtensionHandler.js').ExtensionHandler,
 	defines = require('./mediawiki.parser.defines.js'),
 	$ = require( './fakejquery' );
 
 // define some constructor shortcuts
 var	KV = defines.KV,
+    EOFTk = defines.EOFTk,
     SelfclosingTagTk = defines.SelfclosingTagTk;
 
 // FIXME: Move out to some common helper file?
@@ -22,14 +22,13 @@ function processExtSource(manager, extToken, opts) {
 		tagWidths = extToken.dataAttribs.tagWidths,
 		content = extSrc.substring(tagWidths[0], extSrc.length - tagWidths[1]);
 
-	// FIXME: SSS: This stripping maybe be unecessary after all.
-	//
 	// FIXME: Should this be specific to the extension
-	//
-	// or is it okay to do this unconditionally for all?
+	// Or is it okay to do this unconditionally for all?
 	// Right now, this code is run only for ref and references,
 	// so not a real problem, but if this is used on other extensions,
 	// requires addressing.
+	//
+	// FIXME: SSS: This stripping maybe be unecessary after all.
 	//
 	// Strip all leading white-space
 	var wsMatch = content.match(/^(\s*)([^]*)$/),
@@ -44,31 +43,14 @@ function processExtSource(manager, extToken, opts) {
 		// Pass an async signal since the ext-content is not processed completely.
 		opts.parentCB({tokens: opts.res, async: true});
 
-		// Pipeline for processing ext-content
-		var pipeline = manager.pipeFactory.getPipeline(
-			opts.pipelineType,
-			Util.extendProps({}, opts.pipelineOpts, {
-				wrapTemplates: true
-			})
-		);
+		// Wrap templates always
+		opts.pipelineOpts = Util.extendProps({}, opts.pipelineOpts, { wrapTemplates: true });
 
-		// Set source offsets for this pipeline's content
 		var tsr = extToken.dataAttribs.tsr;
-		pipeline.setSourceOffsets(tsr[0]+tagWidths[0]+leadingWS.length, tsr[1]-tagWidths[1]);
+		opts.srcOffsets = [ tsr[0]+tagWidths[0]+leadingWS.length, tsr[1]-tagWidths[1] ];
 
-		// Set up provided callbacks
-		if (opts.chunkCB) {
-			pipeline.addListener('chunk', opts.chunkCB);
-		}
-		if (opts.endCB) {
-			pipeline.addListener('end', opts.endCB);
-		}
-		if (opts.documentCB) {
-			pipeline.addListener('document', opts.documentCB);
-		}
-
-		// Off the starting block ... ready, set, go!
-		pipeline.process(content);
+		// Process ref content
+		Util.processContentInPipeline( manager, content, opts );
 	}
 }
 
@@ -108,14 +90,18 @@ Ref.prototype.handleRef = function ( manager, pipelineOpts, refTok, cb ) {
 			var da = Util.clone(refTok.dataAttribs);
 			// Clear stx='html' so that sanitizer doesn't barf
 			da.stx = undefined;
+			if (!da.tmp) {
+				da.tmp = {};
+			}
+
+			da.tmp.group = refOpts.group || '';
+			da.tmp.name = refOpts.name || '';
+			da.tmp.content = content || '';
+			da.tmp.skiplinkback = inReferencesExt ? 1 : 0;
 
 			toks.push(new SelfclosingTagTk( 'meta', [
 						new KV('typeof', 'mw:Extension/ref/Marker'),
-						new KV('about', about),
-						new KV('group', refOpts.group || ''),
-						new KV('name', refOpts.name || ''),
-						new KV('content', content || ''),
-						new KV('skiplinkback', inReferencesExt ? 1 : 0)
+						new KV('about', about)
 						], da));
 
 			// All done!
@@ -127,13 +113,14 @@ Ref.prototype.handleRef = function ( manager, pipelineOpts, refTok, cb ) {
 		pipelineType: 'text/x-mediawiki/full',
 		pipelineOpts: {
 			inTemplate: pipelineOpts.inTemplate,
+			noPre: true,
 			extTag: "ref"
 		},
 		res: [],
 		parentCB: cb,
 		emptyContentCB: finalCB,
 		documentCB: function(refContentDoc) {
-			finalCB([], refContentDoc.body.innerHTML);
+			finalCB([], DU.serializeChildren(refContentDoc.body));
 		}
 	});
 };
@@ -256,9 +243,6 @@ function References(cite) {
 	this.reset();
 }
 
-// Inherit functionality from ExtensionHandler
-coreutil.inherits(References, ExtensionHandler);
-
 References.prototype.reset = function(group) {
 	if (group) {
 		setRefGroup(this.refGroups, group, undefined);
@@ -316,30 +300,25 @@ References.prototype.handleReferences = function ( manager, pipelineOpts, refsTo
 			" about='", referencesId, "'",
 			"></ol>"
 		];
-
-		var wrapperDOM = Util.parseHTML(buf.join('')).body.childNodes,
-			ol = wrapperDOM[0];
-
-		var dp = DU.getJSONAttribute(ol, "data-parsoid", {});
-		dp.src = refsTok.getAttribute('source');
-		if (group) {
-			dp.group = group;
-		}
-
-		DU.setJSONAttribute(ol, "data-parsoid", dp);
-
-		var expansion = {
-			nodes: wrapperDOM,
-			html: wrapperDOM.map(function(n) { return n.outerHTML; }).join('')
+		var olProcessor = function(ol) {
+			var dp = DU.getJSONAttribute(ol, "data-parsoid", {});
+			dp.src = refsTok.getAttribute('source');
+			if (group) {
+				dp.group = group;
+			}
+			DU.setJSONAttribute(ol, "data-parsoid", dp);
 		};
 
-		// TemplateHandler wants a manager property
-		//
-		// FIXME: Seems silly -- maybe we should move encapsulateExpansionHTML
-		// into Util and pass env into it .. can avoid extending ExtensionHandler
-		// as well.
-		this.manager = manager;
-		cb({ tokens: this.encapsulateExpansionHTML(refsTok, expansion, referencesId), async: false });
+		cb({
+			async: false,
+			tokens: DU.buildDOMFragmentForTokenStream(
+				refsTok,
+				buf.join(''),
+				manager.env,
+				olProcessor,
+				{ aboutId: referencesId, isForeignContent: true }
+			)
+		});
 	}.bind(this);
 
 	processExtSource(manager, refsTok, {
@@ -363,7 +342,11 @@ References.prototype.handleReferences = function ( manager, pipelineOpts, refsTo
 					t.name === 'meta' &&
 					/^mw:Extension\/ref\/Marker$/.test(t.getAttribute('typeof')))
 				{
-					t.setAttribute("references-id", referencesId);
+					var da = t.dataAttribs;
+					if (!da.tmp) {
+						da.tmp = {};
+					}
+					da.tmp['references-id'] = referencesId;
 					res.push(t);
 				}
 			}
@@ -376,10 +359,11 @@ References.prototype.handleReferences = function ( manager, pipelineOpts, refsTo
 };
 
 References.prototype.extractRefFromNode = function(node) {
-	var group = node.getAttribute("group"),
-		refName = node.getAttribute("name"),
+	var dp = node.data.parsoid,
+		group = dp.tmp.group,
+		refName = dp.tmp.name,
 		about = node.getAttribute("about"),
-		skipLinkback = node.getAttribute("skiplinkback") === "1",
+		skipLinkback = dp.tmp.skiplinkback,
 		refGroup = getRefGroup(this.refGroups, group, true),
 		ref = refGroup.add(refName, about, skipLinkback),
 		nodeType = (node.getAttribute("typeof") || '').replace(/mw:Extension\/ref\/Marker/, '');
@@ -387,7 +371,7 @@ References.prototype.extractRefFromNode = function(node) {
 	// Add ref-index linkback
 	var doc = node.ownerDocument,
 		span = doc.createElement('span'),
-		content = node.getAttribute("content"),
+		content = dp.tmp.content,
 		dataMW = node.getAttribute('data-mw');
 
 	if (!dataMW) {
@@ -432,19 +416,19 @@ References.prototype.extractRefFromNode = function(node) {
 		// refIndex-span
 		node.parentNode.insertBefore(span, node);
 	} else {
-		var referencesAboutId = node.getAttribute("references-id");
+		var referencesAboutId = dp.tmp["references-id"];
 		// Init
 		if (!this.nestedRefsHTMLMap[referencesAboutId]) {
 			this.nestedRefsHTMLMap[referencesAboutId] = ["\n"];
 		}
-		this.nestedRefsHTMLMap[referencesAboutId].push(span.outerHTML, "\n");
+		this.nestedRefsHTMLMap[referencesAboutId].push(DU.serializeNode(span), "\n");
 	}
 
 	// This effectively ignores content from later references with the same name.
 	// The implicit assumption is that that all those identically named refs. are
 	// of the form <ref name='foo' />
 	if (!ref.content) {
-		ref.content = node.getAttribute("content");
+		ref.content = dp.tmp.content;
 	}
 };
 

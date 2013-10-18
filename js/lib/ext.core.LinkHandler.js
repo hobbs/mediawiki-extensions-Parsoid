@@ -19,6 +19,7 @@ var PegTokenizer = require('./mediawiki.tokenizer.peg.js').PegTokenizer,
 	asyncLib = require('async');
 // define some constructor shortcuts
 var KV = defines.KV,
+    EOFTk = defines.EOFTk,
     TagTk = defines.TagTk,
     SelfclosingTagTk = defines.SelfclosingTagTk,
     EndTagTk = defines.EndTagTk,
@@ -86,9 +87,13 @@ WikiLinkHandler.prototype.getWikiLinkTargetInfo = function (token) {
 			// check for interwiki / language links
 			ns = env.conf.wiki.namespaceIds[ nsPrefix.toLowerCase()
 														.replace( ' ', '_' ) ];
-		//console.warn( nsPrefix, ns, env.conf.wiki.namespaceIds );
+		// console.warn( nsPrefix, ns, interwikiInfo );
 		// also check for url to protect against [[constructor:foo]]
-		if ( interwikiInfo && interwikiInfo.url ) {
+		if ( ns !== undefined ) {
+			// FIXME: percent-decode first, then entity-decode!
+			info.title = new Title( Util.decodeURI(href.substr( nsPrefix.length + 1 )),
+					ns, nsPrefix, env );
+		} else if ( interwikiInfo && interwikiInfo.url ) {
 			// interwiki or language link
 			if (info.fromColonEscapedText || interwikiInfo.language === undefined ) {
 				info.interwiki = interwikiInfo;
@@ -97,10 +102,6 @@ WikiLinkHandler.prototype.getWikiLinkTargetInfo = function (token) {
 				info.language = interwikiInfo;
 				info.href = info.href.substr( nsPrefix.length + 1 );
 			}
-		} else if ( ns !== undefined ) {
-			// FIXME: percent-decode first, then entity-decode!
-			info.title = new Title( Util.decodeURI(href.substr( nsPrefix.length + 1 )),
-					ns, nsPrefix, env );
 		} else {
 			info.title = new Title( Util.decodeURI(href), 0, '', env );
 		}
@@ -225,11 +226,10 @@ WikiLinkHandler.prototype.getWikiLinkHandler = function (token, target) {
  * ------------------------------------------------------------ */
 function buildLinkAttrs(attrs, getLinkText, rdfaType, linkAttrs) {
 	var newAttrs = [],
-		linkText = [],
+		linkTextKVs = [],
 		about;
 
-	// In one pass through the attribute array, fetch about, typeof, and
-	// linkText
+	// In one pass through the attribute array, fetch about, typeof, and linkText
 	//
 	// about && typeof are usually at the end of the array if at all present
 	for ( var i = 0, l = attrs.length; i < l; i++ ) {
@@ -239,12 +239,14 @@ function buildLinkAttrs(attrs, getLinkText, rdfaType, linkAttrs) {
 
 		// link-text attrs have the key "maybeContent"
 		if (getLinkText && k === "mw:maybeContent") {
-			linkText.push(kv);
+			linkTextKVs.push(kv);
 		} else if (k.constructor === String && k) {
 			if (k.trim() === "typeof") {
 				rdfaType = rdfaType ? rdfaType + " " + v : v;
 			} else if (k.trim() === "about") {
 				about = v;
+			} else if (k.trim() === "data-mw") {
+				newAttrs.push(kv);
 			}
 		}
 	}
@@ -263,7 +265,7 @@ function buildLinkAttrs(attrs, getLinkText, rdfaType, linkAttrs) {
 
 	return {
 		attribs: newAttrs,
-		content: linkText,
+		contentKVs: linkTextKVs,
 		hasRdfaType: rdfaType !== null
 	};
 }
@@ -275,35 +277,45 @@ function buildLinkAttrs(attrs, getLinkText, rdfaType, linkAttrs) {
  *
  * @returns {Array} Content tokens
  */
-WikiLinkHandler.prototype.addLinkAttributesAndGetContent = function (newTk, token, target) {
+WikiLinkHandler.prototype.addLinkAttributesAndGetContent = function (newTk, token, target, buildDOMFragment) {
 	//console.warn( 'title: ' + JSON.stringify( title ) );
 	var title = target.title,
 		attribs = token.attribs,
+		dataAttribs = token.dataAttribs,
 		newAttrData = buildLinkAttrs(attribs, true, null, [new KV('rel', 'mw:WikiLink')]),
-		content = newAttrData.content,
+		content = newAttrData.contentKVs,
 		env = this.manager.env;
+
 	// Set attribs and dataAttribs
 	newTk.attribs = newAttrData.attribs;
-	newTk.dataAttribs = Util.clone(token.dataAttribs);
-
+	newTk.dataAttribs = Util.clone(dataAttribs);
 	newTk.dataAttribs.src = undefined; // clear src string since we can serialize this
 
 	// Note: Link tails are handled on the DOM in handleLinkNeighbours, so no
 	// need to handle them here.
 	if ( content.length > 0 ) {
+		newTk.dataAttribs.stx = 'piped';
 		var out = [];
 		// re-join content bits
 		for ( var i = 0, l = content.length; i < l ; i++ ) {
-			out = out.concat( content[i].v );
+			var toks = content[i].v;
+			out = out.concat(toks);
 			if ( i < l - 1 ) {
 				out.push( '|' );
 			}
 		}
-		newTk.dataAttribs.stx = 'piped';
-		content = out;
+
+		if (buildDOMFragment) {
+			// content = [part 0, .. part l-1]
+			// offsets = [start(part-0), end(part l-1)]
+			var offsets = dataAttribs.tsr ? [content[0].srcOffsets[0], content[l-1].srcOffsets[1]] : null;
+			content = Util.getDOMFragmentToken(out, offsets, {noPre: true, token: token});
+		} else {
+			content = out;
+		}
 	} else {
-		var morecontent = Util.decodeURI(target.href);
 		newTk.dataAttribs.stx = 'simple';
+		var morecontent = Util.decodeURI(target.href);
 		if ( token.dataAttribs.pipetrick ) {
 			morecontent = Util.stripPipeTrickChars(morecontent);
 		}
@@ -339,16 +351,12 @@ WikiLinkHandler.prototype.addLinkAttributesAndGetContent = function (newTk, toke
  * Render a plain wiki link.
  */
 WikiLinkHandler.prototype.renderWikiLink = function (token, frame, cb, target) {
-	var tokens = [],
-		newTk = new TagTk('a'),
-		content = this.addLinkAttributesAndGetContent(newTk, token, target);
+	var newTk = new TagTk('a'),
+		content = this.addLinkAttributesAndGetContent(newTk, token, target, true);
 
 	newTk.addNormalizedAttribute( 'href', target.title.makeLink(), target.hrefSrc );
 
-	tokens.push( newTk );
-	tokens = tokens.concat(content, [new EndTagTk('a')]);
-
-	cb({tokens: tokens});
+	cb({tokens: [newTk].concat(content, [new EndTagTk('a')])});
 };
 
 /**
@@ -356,19 +364,19 @@ WikiLinkHandler.prototype.renderWikiLink = function (token, frame, cb, target) {
  * normally rendered in a box at the bottom of an article.
  */
 WikiLinkHandler.prototype.renderCategory = function (token, frame, cb, target) {
-
 	var tokens = [],
 		newTk = new SelfclosingTagTk('link'),
 		content = this.addLinkAttributesAndGetContent(newTk, token, target);
 
-	// Change the rel to be mw:WikiLink / Category
-	Util.lookupKV( newTk.attribs, 'rel' ).v += '/Category';
+	var env = this.manager.env;
+
+	// Change the rel to be mw:PageProp/Category
+	Util.lookupKV( newTk.attribs, 'rel' ).v = 'mw:PageProp/Category';
 
 	var strContent = Util.tokensToString( content ),
 		saniContent = Util.sanitizeTitleURI( strContent ).replace( /#/g, '%23' );
 	newTk.addNormalizedAttribute( 'href', target.title.makeLink(), target.hrefSrc );
-	// Change the href to include the sort key, if any (but don't update the
-	// rt info)
+	// Change the href to include the sort key, if any (but don't update the rt info)
 	if ( strContent && strContent !== '' && strContent !== target.href ) {
 		var hrefkv = Util.lookupKV( newTk.attribs, 'href' );
 		hrefkv.v += '#';
@@ -377,30 +385,34 @@ WikiLinkHandler.prototype.renderCategory = function (token, frame, cb, target) {
 
 	tokens.push( newTk );
 
-	// Deal with sort keys generated via templates/extensions
-	var producerInfo = Util.lookupKV( token.attribs, 'mw:valAffected' );
-	if (producerInfo) {
-		// Ensure that the link has about set
-		var about = Util.lookup( newTk.attribs, 'about' );
-		if (!about) {
-			about = this.manager.env.newAboutId();
-			newTk.addAttribute("about", about);
-		}
+	if (content.length === 1) {
+		cb({tokens: tokens});
+	} else {
+		// Deal with sort keys that come from generated content (transclusions, etc.)
+		cb( { async: true } );
+		Util.processAttributeToDOM(
+			this.manager,
+			content,
+			function(dom) {
+				var sortKeyInfo = [ {"txt": "mw:sortKey"}, {"html": dom.body.innerHTML} ],
+					dataMW = newTk.getAttribute("data-mw");
+				if (dataMW) {
+					dataMW = JSON.parse(dataMW);
+					dataMW.attribs.push(sortKeyInfo);
+				} else {
+					dataMW = { attribs: [sortKeyInfo] };
+				}
 
-		// Update typeof
-		newTk.addSpaceSeparatedAttribute("typeof",
-				"mw:ExpandedAttrs/" + producerInfo.v[0].match(/mw:(.*)/)[1]);
+				// Mark token as having expanded attrs
+				newTk.addAttribute("about", env.newAboutId());
+				newTk.addSpaceSeparatedAttribute("typeof", "mw:ExpandedAttrs");
+				newTk.addAttribute("data-mw", JSON.stringify(dataMW));
 
-		// Update producer meta-token and add it to the token stream
-		var metaToken = producerInfo.v[1];
-		metaToken.addAttribute("about", about);
-		var propKV = Util.lookupKV(metaToken.attribs, "property");
-		propKV.v = propKV.v.replace(/mw:maybeContent/, 'mw:sortKey'); // keep it clean
-		tokens.push(metaToken);
+				cb( { tokens: tokens } );
+			}
+		);
 	}
-	cb({tokens: tokens});
 };
-
 
 /**
  * Render a language link. Those normally appear in the list of alternate
@@ -416,8 +428,8 @@ WikiLinkHandler.prototype.renderLanguageLink = function (token, frame, cb, targe
 	var absHref = target.language.url.replace( "$1", target.href );
 	newTk.addNormalizedAttribute('href', absHref, target.hrefSrc);
 
-	// Change the rel to be mw:WikiLink/Language
-	Util.lookupKV( newTk.attribs, 'rel' ).v = 'mw:WikiLink/Language';
+	// Change the rel to be mw:PageProp/Language
+	Util.lookupKV( newTk.attribs, 'rel' ).v = 'mw:PageProp/Language';
 
 	cb({tokens: [newTk]});
 };
@@ -430,14 +442,16 @@ WikiLinkHandler.prototype.renderInterwikiLink = function (token, frame, cb, targ
 
 	var tokens = [],
 		newTk = new TagTk('a', [], token.dataAttribs),
-		content = this.addLinkAttributesAndGetContent(newTk, token, target);
+		content = this.addLinkAttributesAndGetContent(newTk, token, target, true);
 
 	// We set an absolute link to the article in the other wiki/language
 	var absHref = target.interwiki.url.replace( "$1", target.href );
 	newTk.addNormalizedAttribute('href', absHref, target.hrefSrc);
 
-	// Change the rel to be mw:WikiLink/Interwiki
-	Util.lookupKV( newTk.attribs, 'rel' ).v = 'mw:WikiLink/Interwiki';
+	// Change the rel to be mw:ExtLink
+	Util.lookupKV( newTk.attribs, 'rel' ).v = 'mw:ExtLink';
+	// Remember that this was using wikitext syntax though
+	newTk.dataAttribs.isIW = true;
 
 	tokens.push( newTk );
 
@@ -641,52 +655,6 @@ function getPath( info ) {
 	return path.replace(/^https?:\/\//, '//');
 }
 
-// It turns out that image captions can have unclosed block tags which
-// then messes up the entire DOM and wraps the reset of the page into
-// the image caption which is wrong and also screws up the RTing in
-// turn.  So, we forcibly close all unclosed block tags by treating
-// the caption as a well-nested DOM context.
-//
-// TODO: Actually build a real DOM so that inlines etc are
-// encapsulated too. This would need to apply phase 3 token
-// transforms, as the caption as an attribute is already expanded to
-// phase 2.
-function closeUnclosedBlockTags(tokens) {
-	var i, j, n, t,
-		// Store the index of a token in the 'tokens' array
-		// rather than the token itself.
-		openBlockTagStack = [];
-
-	for (i = 0, n = tokens.length; i < n; i++) {
-		t = tokens[i];
-		if (Util.isBlockToken(t)) {
-			if (t.constructor === TagTk) {
-				openBlockTagStack.push(i);
-			} else if (t.constructor === EndTagTk && openBlockTagStack.length > 0) {
-				if (tokens[openBlockTagStack.last()].name === t.name) {
-					openBlockTagStack.pop();
-				}
-			}
-		}
-	}
-
-	n = openBlockTagStack.length;
-	if (n > 0) {
-		if (Object.isFrozen(tokens)) {
-			tokens = tokens.slice();
-		}
-		for (i = 0; i < n; i++) {
-			j = openBlockTagStack.pop();
-			t = tokens[j].clone();
-			t.dataAttribs.autoInsertedEnd = true;
-			tokens[j] = t;
-			tokens.push(new EndTagTk(t.name));
-		}
-	}
-
-	return tokens;
-}
-
 /**
  * Render a file. This can be an image, a sound, a PDF etc.
  *
@@ -696,7 +664,9 @@ function closeUnclosedBlockTags(tokens) {
 WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 {
 	var fileName = target.href,
-		title = target.title;
+		title = target.title,
+		caption, captionSrcOffsets;
+
 	var urlParser = this.urlParser;
 	/**
 	 * Determine the name of an option
@@ -727,10 +697,10 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 			// 'imgOption' is the key we'd put in oHash; it names the 'group'
 			// for the option, and doesn't have an img_ prefix.
 
-			imgOption = WikitextConstants.Image.SimpleOptions[canonicalOption],
+			imgOption = WikitextConstants.Image.SimpleOptions.get( canonicalOption ),
 			bits = getOption( optStr.trim() ),
 			normalizedBit0 = bits ? bits.k.trim().toLowerCase() : null,
-			key = bits ? WikitextConstants.Image.PrefixOptions[normalizedBit0] : null;
+			key = bits ? WikitextConstants.Image.PrefixOptions.get(normalizedBit0) : null;
 
 		if (imgOption && key === null) {
 			return {
@@ -771,7 +741,7 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 	 */
 	function stringifyOptionTokens( tstream, prefix ) {
 		var i, currentToken, tokenType, tkHref, nextResult,
-			skipToEndOf,
+			optInfo, skipToEndOf,
 			resultStr = '';
 
 		prefix = prefix || '';
@@ -888,9 +858,6 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 			info = image.imageinfo[0];
 		} else {
 			image = data.pages[ns + ':' + filename];
-			// SSS FIXME: image.missing doesn't seem to be very useful.
-			// It is often "" even both for missing images as well as valid images.
-			//
 			// FIXME gwicke: Make sure our filename is never of the form
 			// 'File:foo.png|Some caption', as is the case for example in
 			// [[:de:Portal:Thüringen]]. The href is likely templated where
@@ -973,8 +940,8 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 				}
 			}
 
-			if ( caption !== undefined ) {
-				caption = closeUnclosedBlockTags( caption );
+			if (caption) {
+				caption = Util.getDOMFragmentToken(caption, captionSrcOffsets, {noPre: true, token: token});
 			}
 		}
 
@@ -1046,18 +1013,12 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 
 	// First check if we have a cached copy of this image expansion, and
 	// avoid any further processing if we have a cache hit.
-	var cachedFile = this.manager.env.fileCache[token.dataAttribs.src];
+	var env = this.manager.env,
+		cachedFile = env.fileCache[token.dataAttribs.src];
 	if (cachedFile) {
-		// Use the cached result.
-		// mw:DOMFragment wrapping is simplified as we know that we are
-		// dealing with a single subtree rooted either at a figure or a span.
-		var wrapperTokens = DU.getWrapperTokens(cachedFile.nodes),
+		var opts = { noAboutId: true },
+			wrapperTokens = DU.encapsulateExpansionHTML(env, token, cachedFile, opts),
 			firstWrapperToken = wrapperTokens[0];
-		DU.addTypeOf(firstWrapperToken, 'mw:DOMFragment');
-		firstWrapperToken.dataAttribs.html = cachedFile.html;
-
-		// Transfer tsr to the first token
-		firstWrapperToken.dataAttribs.tsr = token.dataAttribs.tsr;
 
 		// Capture the delta between the old/new wikitext start posn.
 		// 'tsr' values are stripped in the original DOM and won't be
@@ -1073,18 +1034,16 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 		return;
 	}
 
-	var env = this.manager.env,
-		// distinguish media types
-		// if image: parse options
-		content = buildLinkAttrs(token.attribs, true, null, null ).content;
+	// distinguish media types
+	// if image: parse options
+	var content = buildLinkAttrs(token.attribs, true, null, null ).contentKVs;
 
 	// extract options
 	// TODO gwicke: abstract out!
-	var i, l, kv, captionSrc, linkSrc, caption, captionOffset, altBackup,
+	var i, l, kv, captionInfo, captionSrc, linkSrc, captionOffset, altBackup,
 		// option hash, both keys and values normalized
 		oHash = { height: null, width: null },
-		validOptions = Object.keys( WikitextConstants.Image.PrefixOptions ),
-		getOption = env.conf.wiki.getMagicPatternMatcher( validOptions );
+		getOption = env.conf.wiki.getMagicPatternMatcher( WikitextConstants.Image.PrefixOptions );
 
 	token.dataAttribs.optList = [];
 
@@ -1094,13 +1053,8 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 			oText = Util.tokensToString( oContent.v, true );
 		//console.log( JSON.stringify( oText, null, 2 ) );
 
-		optInfo = undefined;
-
 		if ( oText === '' ) {
-			token.dataAttribs.optList.push( {
-				ck: '',
-				ak: ''
-			} );
+			token.dataAttribs.optList.push( { ck: '', ak: '' } );
 			continue;
 		}
 
@@ -1114,23 +1068,26 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 		}
 
 		if ( oText.constructor === String ) {
-			if ( optInfo === undefined ) {
-				optInfo = getOptionInfo( oText );
-			}
+			optInfo = getOptionInfo( oText );
 		}
 
 		// For the values of the caption and options, see
-		// getOptionInfo's documentation above
+		// getOptionInfo's documentation above.
+		//
+		// FIXME: If there are multiple captions, this code always
+		// picks the last entry. Is this the spec? If so, explicit
+		// document it here. If not, fix the code.
 		if ( oText.constructor !== String || optInfo === null ) {
 			// No valid option found!?
 			// Record for RT-ing
-			caption = {
+			captionInfo = {
 				v: oContent.v,
 				ak: oText
 			};
 			// So we know where to put it in the array at the end
 			captionOffset = token.dataAttribs.optList.length;
 			captionSrc = oContent.vsrc;
+			captionSrcOffsets = oContent.srcOffsets;
 			continue;
 		}
 
@@ -1173,12 +1130,12 @@ WikiLinkHandler.prototype.renderFile = function (token, frame, cb, target)
 	}
 
 	// Add the caption if there is one
-	if ( caption ) {
+	if ( captionInfo ) {
 		token.dataAttribs.optList.splice( captionOffset, 0, {
 			ck: 'caption',
-			ak: caption.ak
+			ak: captionInfo.ak
 		} );
-		caption = caption.v;
+		caption = captionInfo.v;
 	}
 
 	//var contentPos = token.dataAttribs.contentPos;
@@ -1368,9 +1325,9 @@ ExternalLinkHandler.prototype.onExtLink = function ( token, manager, cb ) {
 
 	var dataAttribs = Util.clone(token.dataAttribs);
 	var rdfaType = token.getAttribute('typeof'),
-		magLinkRe = /(?:^|\s)(mw:ExtLink\/(?:ISBN|RFC|PMID))(?=$|\s)/;
+		magLinkRe = /(?:^|\s)(mw:(?:Ext|Wiki)Link\/(?:ISBN|RFC|PMID))(?=$|\s)/;
 	if ( rdfaType && magLinkRe.test(rdfaType) ) {
-		if ( /(?:^|\s)mw:ExtLink\/ISBN/.test(rdfaType) ) {
+		if ( /(?:^|\s)mw:WikiLink\/ISBN/.test(rdfaType) ) {
 			title = Title.fromPrefixedText( env, href );
 			newAttrs = [
 				new KV('href', title.makeLink()),
@@ -1379,9 +1336,10 @@ ExternalLinkHandler.prototype.onExtLink = function ( token, manager, cb ) {
 		} else {
 			newAttrs = [
 				new KV('href', href),
-				new KV('rel', rdfaType.match( magLinkRe )[1] )
+				new KV('rel', 'mw:ExtLink' )
 			];
 		}
+		token.removeAttribute('typeof');
 
 		// SSS FIXME: Right now, Parsoid does not support templating
 		// of ISBN attributes.  So, "ISBN {{echo|1234567890}}" will not
@@ -1398,11 +1356,7 @@ ExternalLinkHandler.prototype.onExtLink = function ( token, manager, cb ) {
 		} );
 	} else if ( this.urlParser.tokenizeURL( href )) {
 		rdfaType = 'mw:ExtLink';
-		if ( ! content.length ) {
-			content = ['[' + this.linkCount + ']'];
-			this.linkCount++;
-			rdfaType = 'mw:ExtLink/Numbered';
-		} else if ( content.length === 1 &&
+		if ( content.length === 1 &&
 				content[0].constructor === String &&
 				this.urlParser.tokenizeURL( content[0] ) &&
 				this._hasImageLink( content[0] ) )
@@ -1443,6 +1397,9 @@ ExternalLinkHandler.prototype.onExtLink = function ( token, manager, cb ) {
 		} else {
 			aStart.addAttribute( 'href', href );
 		}
+
+		content = Util.getDOMFragmentToken(content, dataAttribs.tsr ? dataAttribs.contentOffsets : null, {noPre: true, token: token});
+
 		cb( {
 			tokens: [aStart].concat(content, [new EndTagTk('a')])
 		} );

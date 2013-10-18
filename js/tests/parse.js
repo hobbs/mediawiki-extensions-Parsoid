@@ -9,6 +9,7 @@ var ParserEnv = require('../lib/mediawiki.parser.environment.js').MWParserEnviro
 	WikitextSerializer = require('../lib/mediawiki.WikitextSerializer.js').WikitextSerializer,
 	SelectiveSerializer = require( '../lib/mediawiki.SelectiveSerializer.js' ).SelectiveSerializer,
 	Util = require('../lib/mediawiki.Util.js').Util,
+	DU = require('../lib/mediawiki.DOMUtils.js').DOMUtils,
 	optimist = require('optimist'),
 	fs = require('fs');
 
@@ -23,6 +24,7 @@ function traceUsage() {
 	buf.push("  * sync:1    : shows tokens flowing through the post-tokenizer Sync Token Transform Manager");
 	buf.push("  * async:2   : shows tokens flowing through the Async Token Transform Manager");
 	buf.push("  * sync:3    : shows tokens flowing through the post-expansion Sync Token Transform Manager");
+	buf.push("  * tsp       : shows tokens flowing through the TokenStreamPatcher (useful to see in-order token stream)");
 	buf.push("  * list      : shows actions of the list handler");
 	buf.push("  * pre       : shows actions of the pre handler");
 	buf.push("  * pre_debug : shows actions of the pre handler + tokens returned from it");
@@ -51,6 +53,7 @@ function dumpFlags() {
 	buf.push("  * dom:pre-dsr       : dumps DOM prior to computing DSR");
 	buf.push("  * dom:post-dsr      : dumps DOM after computing DSR");
 	buf.push("  * dom:pre-encap     : dumps DOM before template encapsulation");
+	buf.push("  * dom:post-encap    : dumps DOM after template encapsulation");
 	buf.push("  * dom:post-dom-diff : in selective serialization, dumps DOM after running dom diff\n");
 	buf.push("--debug dumps state at these different stages\n");
 	buf.push("Examples:");
@@ -212,7 +215,7 @@ function dumpFlags() {
 	}
 	parsoidConfig.fetchConfig = Util.booleanOption( argv.fetchConfig );
 
-	ParserEnv.getParserEnv( parsoidConfig, null, prefix, argv.pagename || null, function ( err, env ) {
+	ParserEnv.getParserEnv( parsoidConfig, null, prefix, argv.pagename || null, null, function ( err, env ) {
 		if ( err !== null ) {
 			console.error( err.toString() );
 			process.exit( 1 );
@@ -251,10 +254,10 @@ function dumpFlags() {
 				argv.oldtext = fs.readFileSync(argv.oldtextfile, 'utf8');
 			}
 			if ( argv.oldhtmlfile ) {
-				env.page.dom = Util.parseHTML(fs.readFileSync(argv.oldhtmlfile, 'utf8')).body;
+				env.page.dom = DU.parseHTML(fs.readFileSync(argv.oldhtmlfile, 'utf8')).body;
 			}
 			if ( argv.domdiff ) {
-				env.page.domdiff = { isEmpty: false, dom: Util.parseHTML(fs.readFileSync(argv.domdiff, 'utf8')).body };
+				env.page.domdiff = { isEmpty: false, dom: DU.parseHTML(fs.readFileSync(argv.domdiff, 'utf8')).body };
 			}
 			env.setPageSrcInfo( argv.oldtext || null );
 			if ( argv.selser ) {
@@ -272,7 +275,7 @@ function dumpFlags() {
         var processInput = function() {
             var input = inputChunks.join('');
             if (argv.html2wt || argv.html2html) {
-                var doc = Util.parseHTML(input.replace(/\r/g, '')),
+                var doc = DU.parseHTML(input.replace(/\r/g, '')),
                     wt = '';
 
                 serializer.serializeDOM( doc.body, function ( chunk ) {
@@ -287,10 +290,10 @@ function dumpFlags() {
 							var out;
 							if ( argv.normalize ) {
 								out = Util.normalizeOut
-									(document.body.innerHTML,
+									(DU.serializeNode(document.body),
 									 (argv.normalize==='parsoid') );
 							} else {
-								out = Util.serializeNode(document.body);
+								out = DU.serializeNode(document.body);
 							}
                             stdout.write( out );
                         });
@@ -309,16 +312,16 @@ function dumpFlags() {
                     if (argv.wt2html) {
 						if ( argv.normalize ) {
 							res = Util.normalizeOut
-								(document.body.innerHTML,
+								(DU.serializeNode(document.body),
 								 (argv.normalize==='parsoid') );
 						} else {
-							res = Util.serializeNode(document.body);
+							res = DU.serializeNode(document.body);
 						}
                         finishCb(true);
                     } else {
                         res = '';
                         serializer.serializeDOM(
-							Util.parseHTML(Util.serializeNode(document, true)).body,
+							DU.parseHTML(DU.serializeNode(document, true)).body,
 							function ( chunk ) {
 								res += chunk;
 							},

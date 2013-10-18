@@ -1,6 +1,7 @@
 /* Perform post-processing steps on an already-built HTML DOM. */
 
 "use strict";
+require('./core-upgrade');
 
 var domino = require('./domino'),
 	events = require('events'),
@@ -46,13 +47,13 @@ var metadataMap = {
 	rev_timestamp: {
 		property: 'dc:modified',
 		content: function(m) {
-			return new Date(m.rev_timestamp).toISOString();
+			return new Date(m.get('rev_timestamp')).toISOString();
 		}
 	},
 	// user is not stable (but userid is)
 	rev_user:      {
 		about: function(m) {
-			return 'mwr:user/' + m.rev_userid;
+			return 'mwr:user/' + m.get('rev_userid');
 		},
 		property: 'dc:title',
 		content: '%s'
@@ -105,7 +106,11 @@ function prepareDOM( node ) {
 		if ( /^mw:/.test( type ) ) {
 			var meta = node.ownerDocument.createElement( "meta" );
 			data.attrs.forEach(function ( attr ) {
-				meta.setAttribute( attr.name, attr.value );
+				try {
+					meta.setAttribute( attr.name, attr.value );
+				} catch(e) {
+					console.error( 'WARNING: prepareDOM: Dropped invalid attribute ' + attr.name );
+				}
 			});
 			node.parentNode.insertBefore( meta, node );
 			DU.deleteNode( node );
@@ -206,8 +211,8 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 	}
 
 	// DOMTraverser only processes document.body.childNodes
-	// So, this is a hacky patch to set data-parsoid on document.body
-	cleanupAndSaveDataParsoid(document.body);
+	document.body.data.parsoid.tmp = undefined;
+	DU.saveDataAttribs(document.body);
 
 	// add <head> element if it was missing
 	if (!document.head) {
@@ -227,24 +232,25 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 	// add <head> content based on page meta data:
 
 	// collect all the page meta data (including revision metadata) in 1 object
-	var m = Object.create( null );
+	var m = new Map();
 	Object.keys( env.page.meta || {} ).forEach(function( k ) {
-		m[k] = env.page.meta[k];
+		m.set( k, env.page.meta[k] );
 	});
-	Object.keys( m.revision || {} ).forEach(function( k ) {
-		m['rev_'+k] = m.revision[k];
+	var rev = m.get( 'revision' );
+	Object.keys( rev || {} ).forEach(function( k ) {
+		m.set( 'rev_' + k, rev[k] );
 	});
 	// use the metadataMap to turn collected data into <meta> and <link> tags.
-	Object.keys( m ).forEach(function( f ) {
+	m.forEach(function( g, f ) {
 		var mdm = metadataMap[f];
-		if ( m[f]===null || m[f]===undefined || !mdm ) { return; }
+		if ( !m.has(f) || m.get(f) === null || !mdm ) { return; }
 		// generate proper attributes for the <meta> or <link> tag
 		var attrs = Object.create( null );
 		Object.keys( mdm ).forEach(function( k ) {
 			// evaluate a function, or perform sprintf-style formatting, or
 			// use string directly, depending on value in metadataMap
 			var v = ( typeof(mdm[k])==='function' ) ? mdm[k]( m ) :
-				mdm[k].indexOf('%') >= 0 ? util.format( mdm[k], m[f] ) :
+				mdm[k].indexOf('%') >= 0 ? util.format( mdm[k], m.get(f) ) :
 				mdm[k];
 			attrs[k] = v;
 		});
@@ -253,9 +259,9 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 		              ( attrs.resource || attrs.href ) ? 'link' : 'meta',
 		              attrs );
 	});
-	if (m.rev_revid) {
+	if ( m.has('rev_revid') ) {
 		document.documentElement.setAttribute(
-			'about', mwrPrefix + 'revision/' + m.rev_revid );
+			'about', mwrPrefix + 'revision/' + m.get('rev_revid') );
 	}
 	// Set the parsoid version
 	appendToHead( document, 'meta',

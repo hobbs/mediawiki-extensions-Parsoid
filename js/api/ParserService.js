@@ -24,7 +24,8 @@ var express = require('express'),
 	childProc = require('child_process'),
 	spawn = childProc.spawn,
 	cluster = require('cluster'),
-	fs = require('fs');
+	fs = require('fs'),
+	path = require('path');
 
 // local includes
 var mp = '../lib/';
@@ -98,13 +99,13 @@ var htmlSpecialChars = function ( s ) {
  *
  * @method
  * @param {Response} res The response object from our routing function.
+ * @param {string} action Path to post
+ * @param {string} name Name of textarea
  * @param {string} content The content we should put in the textarea
  */
-var textarea = function ( res, content ) {
-	res.write('<form method=POST><textarea name="content" cols=90 rows=9>');
-	res.write( ( content &&
-					htmlSpecialChars( content) ) ||
-			'');
+var textarea = function ( res, action, name, content ) {
+	res.write('<form method=POST action="' + action + '"><textarea name="' + name + '" cols=90 rows=9>');
+	res.write( ( content && htmlSpecialChars( content) ) || '' );
 	res.write('</textarea><br><input type="submit"></form>');
 };
 
@@ -347,6 +348,10 @@ var parse = function ( env, req, res, cb, err, src_and_metadata ) {
 /* -------------------- web app access points below --------------------- */
 
 var app = express.createServer();
+
+// favicon
+app.use(express.favicon(path.join(__dirname, "favicon.ico")));
+
 // Increase the form field size limit from the 2M default.
 app.use(express.bodyParser({maxFieldsSize: 15 * 1024 * 1024}));
 
@@ -369,26 +374,56 @@ app.get('/', function(req, res){
 	res.end('</body></html>');
 });
 
+function ParserError( msg, stack, code ) {
+	Error.call( this, msg );
+	this.stack = stack;
+	this.code = code;
+}
 
-var getParserServiceEnv = function ( res, iwp, pageName, cb, req ) {
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, iwp || '', pageName,
-			req.headers.cookie, function ( err, env ) {
+function errorHandler( err, req, res, next ) {
+	if ( !(err instanceof ParserError) ) {
+		return next( err );
+	}
+
+	console.error( 'ERROR in ' + res.locals.iwp + ':' + res.locals.pageName + ':\n' + err.message );
+	console.error( "Stack trace: " + err.stack );
+	res.send( err.stack, err.code );
+
+	// Force a clean restart of this worker
+	process.exit( 1 );
+}
+
+app.use( errorHandler );
+
+function defaultParams( req, res, next ) {
+	res.locals.iwp = parsoidConfig.defaultWiki || '';
+	res.locals.pageName = req.params[0];
+	next();
+}
+
+function interParams( req, res, next ) {
+	res.locals.iwp = req.params[0];
+	res.locals.pageName = req.params[1];
+	next();
+}
+
+function parserEnvMw( req, res, next ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.iwp, res.locals.pageName, req.headers.cookie, function ( err, env ) {
 		env.errCB = function ( e ) {
-			var errmsg = e.stack || e.toString();
-			var code = e.code || 500;
-			console.error( 'ERROR in ' + iwp + ':' + pageName + ':\n' + e.message);
-			console.error("Stack trace: " + errmsg);
-			res.send( errmsg, code );
-			// Force a clean restart of this worker
-			process.exit(1);
+			e = new ParserError(
+				e.message,
+				e.stack || e.toString(),
+				e.code || 500
+			);
+			next( e );
 		};
-		if ( err === null ) {
-			cb( env );
-		} else {
-			env.errCB( err );
+		if ( err ) {
+			return env.errCb( err );
 		}
-	} );
-};
+		res.locals.env = env;
+		next();
+	});
+}
 
 // robots.txt: no indexing.
 app.get(/^\/robots.txt$/, function ( req, res ) {
@@ -427,201 +462,234 @@ app.post( /^\/_bugs\//, function ( req, res ) {
 	res.end( );
 });
 
+function action( res ) {
+	return [ "", res.locals.iwp, res.locals.pageName ].join( "/" );
+}
 
 // Form-based HTML DOM -> wikitext interface for manual testing
-app.get(/\/_html\/(.*)/, function ( req, res ) {
-	var cb = function ( env ) {
-		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		res.write( "Your HTML DOM:" );
-		textarea( res );
-		res.end('');
-	};
-
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
-} );
-
-app.post(/\/_html\/(.*)/, function ( req, res ) {
-	var cb = function ( env ) {
-		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		var doc = DU.parseHTML(req.body.content.replace(/\r/g, ''));
-		res.write('<pre style="background-color: #efefef">');
-		// Always use the non-selective serializer for this mode
-		new WikitextSerializer({env: env}).serializeDOM(
-			doc.body,
-			function( c ) {
-				res.write( htmlSpecialChars( c ) );
-			},
-			function() {
-				res.write('</pre>');
-				res.write( "<hr>Your HTML DOM:" );
-				textarea( res, req.body.content.replace(/\r/g, '') );
-				res.end('');
-			}
-			);
-	};
-
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
-} );
+app.get(/\/_html\/(.*)/, defaultParams, parserEnvMw, function ( req, res ) {
+	res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
+	res.write( "Your HTML DOM:" );
+	textarea( res, action( res ), "html" );
+	res.end();
+});
 
 // Form-based wikitext -> HTML DOM interface for manual testing
-app.get(/\/_wikitext\/(.*)/, function ( req, res ) {
-	var cb = function ( env ) {
-		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		res.write( "Your wikitext:" );
-		textarea( res );
-		res.end('');
-	};
-
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
-} );
-
-app.post(/\/_wikitext\/(.*)/, function ( req, res ) {
-	var cb = function ( env ) {
-		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		var parser = Util.getParserPipeline(env, 'text/x-mediawiki/full'),
-			src = req.body.content.replace(/\r/g, '');
-		parser.on('document', function ( document ) {
-			if (req.body.format==='html') {
-				res.write(DU.serializeNode(document));
-			} else {
-				res.write('<pre style="white-space: pre-wrap; white-space: -moz-pre-wrap; white-space: -pre-wrap; white-space: -o-pre-wrap; word-wrap: break-word;">');
-				res.write(htmlSpecialChars(DU.serializeNode(document.body)));
-				res.write('</pre>');
-				res.write('<hr/>');
-				res.write(document.body.innerHTML);
-				res.write('<hr style="clear:both;"/>Your wikitext:');
-				textarea( res, src );
-			}
-			res.end('');
-		});
-		if (env.conf.parsoid.allowCORS) {
-			// allow cross-domain requests (CORS) so that parsoid service
-			// can be used by third-party sites
-			res.setHeader('Access-Control-Allow-Origin',
-						  env.conf.parsoid.allowCORS);
-		}
-		try {
-			console.log('starting parsing of ' + req.params[0]);
-			// FIXME: This does not handle includes or templates correctly
-			env.setPageSrcInfo( src );
-			parser.processToplevelDoc( src );
-		} catch (e) {
-			res.setHeader('Content-Type', 'text/plain; charset=UTF-8');
-			console.error( e.stack || e.toString() );
-			res.send( e.stack || e.toString(), 500 );
-		}
-	};
-
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
-} );
+app.get(/\/_wikitext\/(.*)/, defaultParams, parserEnvMw, function ( req, res ) {
+	res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
+	res.write( "Your wikitext:" );
+	textarea( res, action( res ), "wt" );
+	res.end();
+});
 
 // Round-trip article testing
-app.get( new RegExp('/_rt/(' + getInterwikiRE() + ')/(.*)'), function(req, res) {
-	var cb = function ( env ) {
-		req.connection.setTimeout(300 * 1000);
+app.get( new RegExp('/_rt/(' + getInterwikiRE() + ')/(.*)'), interParams, parserEnvMw, function(req, res) {
+	var env = res.locals.env;
+	req.connection.setTimeout(300 * 1000);
 
-		if ( env.page.name === 'favicon.ico' ) {
-			res.send( 'no favicon yet..', 404 );
-			return;
-		}
+	if ( env.page.name === 'favicon.ico' ) {
+		res.send( 'no favicon yet..', 404 );
+		return;
+	}
 
-		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
+	var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
 
-		console.log('starting parsing of ' + target);
-		var oldid = null;
-		if ( req.query.oldid ) {
-			oldid = req.query.oldid;
-		}
-		var tpr = new TemplateRequest( env, target, oldid );
-		tpr.once('src', parse.bind( tpr, env, req, res, roundTripDiff.bind( null, false ) ));
-	};
-
-	getParserServiceEnv( res, req.params[0], req.params[1], cb, req );
-} );
+	console.log('starting parsing of ' + target);
+	var oldid = null;
+	if ( req.query.oldid ) {
+		oldid = req.query.oldid;
+	}
+	var tpr = new TemplateRequest( env, target, oldid );
+	tpr.once('src', parse.bind( tpr, env, req, res, roundTripDiff.bind( null, false ) ));
+});
 
 // Round-trip article testing with newline stripping for editor-created HTML
 // simulation
-app.get( new RegExp('/_rtve/(' + getInterwikiRE() + ')/(.*)') , function(req, res) {
-	var cb = function ( env ) {
-		if ( env.page.name === 'favicon.ico' ) {
-			res.send( 'no favicon yet..', 404 );
-			return;
-		}
+app.get( new RegExp('/_rtve/(' + getInterwikiRE() + ')/(.*)'), interParams, parserEnvMw, function(req, res) {
+	var env = res.locals.env;
+	if ( env.page.name === 'favicon.ico' ) {
+		res.send( 'no favicon yet..', 404 );
+		return;
+	}
 
-		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
+	var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
 
-		console.log('starting parsing of ' + target);
-		var oldid = null;
-		if ( req.query.oldid ) {
-			oldid = req.query.oldid;
-		}
-		var tpr = new TemplateRequest( env, target, oldid ),
-			cb = function ( req, res, src, document ) {
-				// strip newlines from the html
-				var html = document.innerHTML.replace(/[\r\n]/g, ''),
-					newDocument = DU.parseHTML(html);
-				roundTripDiff( false, req, res, src, newDocument );
-			};
+	console.log('starting parsing of ' + target);
+	var oldid = null;
+	if ( req.query.oldid ) {
+		oldid = req.query.oldid;
+	}
+	var tpr = new TemplateRequest( env, target, oldid ),
+		cb = function ( req, res, src, document ) {
+			// strip newlines from the html
+			var html = document.innerHTML.replace(/[\r\n]/g, ''),
+				newDocument = DU.parseHTML(html);
+			roundTripDiff( false, req, res, src, newDocument );
+		};
 
-		tpr.once('src', parse.bind( tpr, env, req, res, cb ));
-	};
-
-	getParserServiceEnv( res, req.params[0], req.params[1], cb, req );
+	tpr.once('src', parse.bind( tpr, env, req, res, cb ));
 });
 
 // Round-trip article testing with selser over re-parsed HTML.
-app.get( new RegExp('/_rtselser/(' + getInterwikiRE() + ')/(.*)') , function (req, res) {
-	var envCb = function ( env ) {
-		if ( env.page.name === 'favicon.ico' ) {
-			res.send( 'no favicon yet..', 404 );
-			return;
-		}
+app.get( new RegExp('/_rtselser/(' + getInterwikiRE() + ')/(.*)'), interParams, parserEnvMw, function (req, res) {
+	var env = res.locals.env;
+	if ( env.page.name === 'favicon.ico' ) {
+		res.send( 'no favicon yet..', 404 );
+		return;
+	}
 
-		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
+	var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
 
-		console.log( 'starting parsing of ' + target );
-		var oldid = null;
-		if ( req.query.oldid ) {
-			oldid = req.query.oldid;
-		}
-		var tpr = new TemplateRequest( env, target, oldid ),
-			tprCb = function ( req, res, src, document ) {
-				var newDocument = DU.parseHTML( DU.serializeNode(document) );
-				roundTripDiff( true, req, res, src, newDocument );
-			};
+	console.log( 'starting parsing of ' + target );
+	var oldid = null;
+	if ( req.query.oldid ) {
+		oldid = req.query.oldid;
+	}
+	var tpr = new TemplateRequest( env, target, oldid ),
+		tprCb = function ( req, res, src, document ) {
+			var newDocument = DU.parseHTML( DU.serializeNode(document) );
+			roundTripDiff( true, req, res, src, newDocument );
+		};
 
-		tpr.once( 'src', parse.bind( tpr, env, req, res, tprCb ) );
-	};
-
-	getParserServiceEnv( res, req.params[0], req.params[1], envCb );
+	tpr.once( 'src', parse.bind( tpr, env, req, res, tprCb ) );
 });
 
 // Form-based round-tripping for manual testing
-app.get(/\/_rtform\/(.*)/, function ( req, res ) {
-	var cb = function ( env ) {
-		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		res.write( "Your wikitext:" );
-		textarea( res );
-		res.end('');
-	};
-
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
+app.get(/\/_rtform\/(.*)/, defaultParams, parserEnvMw, function ( req, res ) {
+	res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+	res.write( "Your wikitext:" );
+	textarea( res, "/_rtform/" + res.locals.pageName , "content" );
+	res.end();
 });
 
-app.post(/\/_rtform\/(.*)/, function ( req, res ) {
-	var cb = function ( env ) {
-		res.setHeader('Content-Type', 'text/html; charset=UTF-8');
-		// we don't care about \r, and normalize everything to \n
-		parse( env, req, res, roundTripDiff.bind( null, false ), null, {
-			revision: { '*': req.body.content.replace(/\r/g, '') }
-		});
-	};
+app.post(/\/_rtform\/(.*)/, defaultParams, parserEnvMw, function ( req, res ) {
+	var env = res.locals.env;
+	res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+	// we don't care about \r, and normalize everything to \n
+	parse( env, req, res, roundTripDiff.bind( null, false ), null, {
+		revision: { '*': req.body.content.replace(/\r/g, '') }
+	});
+});
 
-	getParserServiceEnv( res, parsoidConfig.defaultWiki, req.params[0], cb, req );
-} );
+function html2wt( req, res, html ) {
+	var env = res.locals.env;
+	env.page.id = req.body.oldid || null;
+
+	var doc;
+	try {
+		doc = DU.parseHTML( html.replace( /\r/g, '' ) );
+	} catch ( e ) {
+		console.log( 'There was an error in the HTML5 parser! Sending it back to the editor.' );
+		env.errCB( e );
+		return;
+	}
+
+	try {
+		var out = [];
+		new Serializer( { env: env, oldid: env.page.id } ).serializeDOM(
+			doc.body,
+			function ( chunk ) {
+				out.push( chunk );
+			}, function () {
+				res.setHeader( 'Content-Type', 'text/x-mediawiki; charset=UTF-8' );
+				res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
+				res.end( out.join( '' ) );
+			} );
+	} catch ( e ) {
+		env.errCB( e );
+	}
+}
+
+function wt2html( req, res, wt ) {
+	var env = res.locals.env;
+	var prefix = res.locals.iwp;
+	var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
+
+	// Set the timeout to 900 seconds..
+	req.connection.setTimeout( 900 * 1000 );
+
+	console.log( 'starting parsing of ' + prefix + ':' + target );
+
+	if ( env.conf.parsoid.allowCORS ) {
+		// allow cross-domain requests (CORS) so that parsoid service
+		// can be used by third-party sites
+		res.setHeader( 'Access-Control-Allow-Origin',
+					   env.conf.parsoid.allowCORS );
+	}
+
+	var tmpCb, oldid = null;
+	if ( wt ) {
+		wt = wt.replace( /\r/g, '' );
+		tmpCb = function ( err, src_and_metadata ) {
+			if ( err ) {
+				env.errCB( err );
+				return;
+			}
+
+			var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
+			parser.on( 'document', function ( document ) {
+				res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
+				// Don't cache requests when wt is set in case somebody uses
+				// GET for wikitext parsing
+				res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
+				sendRes( req.body.body ? document.body : document );
+			});
+
+			// Set the source
+			env.setPageSrcInfo( src_and_metadata );
+
+			try {
+				parser.processToplevelDoc( wt );
+			} catch ( e ) {
+				env.errCB( e );
+				return;
+			}
+		};
+	} else {
+		if ( req.query.oldid ) {
+			oldid = req.query.oldid;
+			if ( !req.headers.cookie ) {
+				res.setHeader( 'Cache-Control', 's-maxage=2592000' );
+			} else {
+				res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
+			}
+			tmpCb = parse.bind( null, env, req, res, function ( req, res, src, doc ) {
+				sendRes( doc.documentElement );
+			});
+		} else {
+			// Don't cache requests with a session or no oldid
+			res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
+			tmpCb = function ( err, src_and_metadata ) {
+				if ( err ) {
+					env.errCB( err );
+					return;
+				}
+
+				// Set the source
+				env.setPageSrcInfo( src_and_metadata );
+
+				// Redirect to oldid
+				res.redirect( req.path + "?oldid=" + env.page.meta.revision.revid );
+				console.warn( "redirected " + prefix + ':' + target + " to revision " + env.page.meta.revision.revid );
+			};
+		}
+	}
+
+	var tpr = new TemplateRequest( env, target, oldid );
+	tpr.once( 'src', tmpCb );
+
+	function sendRes( doc ) {
+		var out = DU.serializeNode( doc );
+		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
+		res.end( out );
+		console.warn( "completed parsing of " + prefix + ':' + target + " in " + env.performance.duration + " ms" );
+	}
+}
 
 // Regular article parsing
-app.get(new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function(req, res) {
+app.get( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function(req, res) {
+	var env = res.locals.env;
+
 	// TODO gwicke: re-enable this when actually using Varnish
 	//if (/only-if-cached/.test(req.headers['cache-control'])) {
 	//	res.send( 'Clearly not cached since this request reached Parsoid. Please fix Varnish.',
@@ -629,83 +697,21 @@ app.get(new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function(req, res) {
 	//	return;
 	//}
 
-	var cb = function ( env ) {
-		if ( env.page.name === 'favicon.ico' ) {
-			res.send( 'no favicon yet..', 404 );
-			return;
-		}
-
-		//console.log(req.headers);
-
-		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
-
-		// Set the timeout to 900 seconds..
-		req.connection.setTimeout(900 * 1000);
-
-		console.log('starting parsing of ' + prefix + ':' + target);
-		var oldid = null;
-		if ( req.query.oldid && !req.headers.cookie ) {
-			oldid = req.query.oldid;
-			res.setHeader('Cache-Control', 's-maxage=2592000');
-		} else {
-			// Don't cache requests with a session or no oldid
-			res.setHeader('Cache-Control', 'private,no-cache,s-maxage=0');
-		}
-		if (env.conf.parsoid.allowCORS) {
-			// allow cross-domain requests (CORS) so that parsoid service
-			// can be used by third-party sites
-			res.setHeader('Access-Control-Allow-Origin',
-						  env.conf.parsoid.allowCORS);
-		}
-
-		var tpr = new TemplateRequest( env, target, oldid );
-		tpr.once('src', parse.bind( null, env, req, res, function ( req, res, src, doc ) {
-			var out = DU.serializeNode(doc.documentElement);
-			res.setHeader('X-Parsoid-Performance', env.getPerformanceHeader());
-			res.end(out);
-			console.warn("completed parsing of " + prefix +
-				':' + target + " in " + env.performance.duration + " ms");
-		}));
-	};
-
-	var prefix = req.params[0];
-	getParserServiceEnv( res, prefix, req.params[1], cb, req );
-} );
+	wt2html( req, res );
+});
 
 // Regular article serialization using POST
-app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), function ( req, res ) {
-	var cb = function ( env ) {
-		var doc, oldid = req.body.oldid || null;
-		env.page.id = oldid;
+app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function ( req, res ) {
 
-		res.setHeader('Content-Type', 'text/x-mediawiki; charset=UTF-8');
+	// parse html or wt
+	if ( req.body.wt ) {
+		wt2html( req, res, req.body.wt );
+	} else {
+		html2wt( req, res, req.body.html ? req.body.html : req.body.content );
+	}
 
-		try {
-			doc = DU.parseHTML(req.body.content);
-		} catch ( e ) {
-			console.log( 'There was an error in the HTML5 parser! Sending it back to the editor.' );
-			env.errCB(e);
-			return;
-		}
+});
 
-		try {
-			var out = [];
-			new Serializer( { env: env, oldid: env.page.id } ).serializeDOM(
-				doc.body,
-				function ( chunk ) {
-					out.push(chunk);
-				}, function () {
-					res.setHeader('X-Parsoid-Performance', env.getPerformanceHeader());
-					res.write( out.join('') );
-					res.end('');
-				} );
-		} catch ( e ) {
-			env.errCB( e );
-		}
-	};
-
-	getParserServiceEnv( res, req.params[0], req.params[1], cb, req );
-} );
 
 /**
  * Continuous integration end points

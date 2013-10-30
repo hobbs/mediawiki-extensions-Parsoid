@@ -19,7 +19,7 @@ var domino = require('./domino'),
 	handleUnbalancedTables = require('./dom.handleUnbalancedTables.js').handleUnbalancedTables,
 	markFosteredContent = require('./dom.markFosteredContent.js').markFosteredContent,
 	markTreeBuilderFixups = require('./dom.markTreeBuilderFixups.js').markTreeBuilderFixups,
-	migrateStartMetas = require('./dom.migrateStartMetas.js').migrateStartMetas,
+	migrateTemplateMarkerMetas = require('./dom.migrateTemplateMarkerMetas.js').migrateTemplateMarkerMetas,
 	migrateTrailingNLs = require('./dom.migrateTrailingNLs.js').migrateTrailingNLs,
 	TableFixups = require('./dom.t.TableFixups.js'),
 	stripMarkerMetas = CleanUp.stripMarkerMetas,
@@ -82,8 +82,8 @@ if (testDom.body.getAttribute('somerandomstring') === '') {
 }
 
 /**
- * Migrate data-parsoid attributes into a property on each DOM node. We'll
- * migrate them back in the final DOM traversal.
+ * Migrate data-parsoid attributes into a property on each DOM node.
+ * We may migrate them back in the final DOM traversal.
  *
  * Various mw metas are converted to comments before the tree build to
  * avoid fostering. Piggy-backing the reconversion here to avoid excess
@@ -92,7 +92,11 @@ if (testDom.body.getAttribute('somerandomstring') === '') {
 function prepareDOM( node ) {
 	DU.loadDataParsoid( node );
 
-	if ( DU.isComment( node ) && /^\{.*\}$/.test( node.data ) ) {
+	if ( DU.isElt( node ) ) {
+		node.removeAttribute( "data-parsoid" );
+	}
+
+	if ( DU.isComment( node ) && /^\{[^]+\}$/.test( node.data ) ) {
 
 		var data, type;
 		try {
@@ -145,8 +149,11 @@ function DOMPostProcessor(env, options) {
 		dataParsoidLoader.traverse.bind( dataParsoidLoader ),
 		markFosteredContent,
 		handleUnbalancedTables,
-		migrateStartMetas,
 		markTreeBuilderFixups,
+		// Run this after 'markTreeBuilderFixups' because the mw:StartTag
+		// and mw:EndTag metas would otherwise interfere with the
+		// firstChild/lastChild check that this pass does.
+		migrateTemplateMarkerMetas,
 		handlePres,
 		migrateTrailingNLs
 	];
@@ -181,7 +188,7 @@ function DOMPostProcessor(env, options) {
 	domVisitor2.addHandler( 'td', tableFixer.reparseTemplatedAttributes.bind( tableFixer, env ) );
 	domVisitor2.addHandler( 'th', tableFixer.reparseTemplatedAttributes.bind( tableFixer, env ) );
 	// 4. Save data.parsoid into data-parsoid html attribute.
-	domVisitor2.addHandler( null, cleanupAndSaveDataParsoid );
+	domVisitor2.addHandler( null, cleanupAndSaveDataParsoid.bind( null, env ) );
 	this.processors.push(domVisitor2.traverse.bind(domVisitor2));
 }
 
@@ -202,6 +209,16 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 		console.warn("--------------------------------");
 	}
 
+	// holder for data-parsoid
+	if ( psd.storeDataParsoid ) {
+		document.data = {
+			parsoid: {
+				counter: -1,
+				ids: {}
+			}
+		};
+	}
+
 	for (var i = 0; i < this.processors.length; i++) {
 		try {
 			this.processors[i](document, this.env, this.options);
@@ -209,10 +226,6 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 			env.errCB(e);
 		}
 	}
-
-	// DOMTraverser only processes document.body.childNodes
-	document.body.data.parsoid.tmp = undefined;
-	DU.saveDataAttribs(document.body);
 
 	// add <head> element if it was missing
 	if (!document.head) {
@@ -243,7 +256,9 @@ DOMPostProcessor.prototype.doPostProcess = function ( document ) {
 	// use the metadataMap to turn collected data into <meta> and <link> tags.
 	m.forEach(function( g, f ) {
 		var mdm = metadataMap[f];
-		if ( !m.has(f) || m.get(f) === null || !mdm ) { return; }
+		if ( !m.has(f) || m.get(f) === null || m.get(f) === undefined || !mdm ) {
+			return;
+		}
 		// generate proper attributes for the <meta> or <link> tag
 		var attrs = Object.create( null );
 		Object.keys( mdm ).forEach(function( k ) {

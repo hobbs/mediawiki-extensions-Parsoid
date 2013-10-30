@@ -623,7 +623,7 @@ WSP.escapedText = function(state, sol, origText, fullWrap) {
 			switch (t.constructor) {
 			case String:
 				if (t.length > 0) {
-					if (sol && t.match(/(^|\n)[ \t]/)) {
+					if (sol && t.match(/(^|\n) /)) {
 						smartNowikier(true, true, t, i, n);
 					} else {
 						buf.push(t);
@@ -780,7 +780,7 @@ WSP.escapeWikiText = function ( state, text, opts ) {
 	// Quick check for the common case (useful to kill a majority of requests)
 	//
 	// Pure white-space or text without wt-special chars need not be analyzed
-	if (!fullCheckNeeded && !/(^|\n)[ \t]+[^\s]+|[<>\[\]\-\+\|'!=#\*:;~{}]|__[^_]*__/.test(text)) {
+	if (!fullCheckNeeded && !/(^|\n) +[^\s]+|[<>\[\]\-\+\|'!=#\*:;~{}]|__[^_]*__/.test(text)) {
 		if (this.traceWTE) {
 			console.warn("---No-checks needed---");
 		}
@@ -817,7 +817,7 @@ WSP.escapeWikiText = function ( state, text, opts ) {
 		// Test 1: '', [], <> need escaping wherever they occur
 		//         = needs escaping in end-of-line context
 		// Test 2: {|, |}, ||, |-, |+,  , *#:;, ----, =*= need escaping only in SOL context.
-		if (!sol && !text.match(/''|[<>]|\[.*\]|\]|(=[ \t]*(\n|$))/)) {
+		if (!sol && !text.match(/''|[<>]|\[.*\]|\]|(=[ ]*(\n|$))/)) {
 			// It is not necessary to test for an unmatched opening bracket ([)
 			// as long as we always escape an unmatched closing bracket (]).
 			if (this.traceWTE) {
@@ -828,7 +828,7 @@ WSP.escapeWikiText = function ( state, text, opts ) {
 
 		// Quick checks when on a newline
 		// + can only occur as "|+" and - can only occur as "|-" or ----
-		if (sol && !text.match(/(^|\n)[ \t#*:;=]|[<\[\]>\|'!]|\-\-\-\-|__[^_]*__/)) {
+		if (sol && !text.match(/(^|\n)[ #*:;=]|[<\[\]>\|'!]|\-\-\-\-|__[^_]*__/)) {
 			if (this.traceWTE) {
 				console.warn("---SOL and safe---");
 			}
@@ -840,7 +840,7 @@ WSP.escapeWikiText = function ( state, text, opts ) {
 	// and moved them to a stream handler. So, we always conservatively
 	// escape text with ' ' in sol posn with one caveat
 	// * indent-pres are disabled in ref-bodies (See ext.core.PreHandler.js)
-	if (sol && (this.options.extName !== 'ref') && text.match(/(^|\n)[ \t]+[^\s]+/)) {
+	if (sol && (this.options.extName !== 'ref') && text.match(/(^|\n) +[^\s]+/)) {
 		if (this.traceWTE) {
 			console.warn("---SOL and pre---");
 		}
@@ -1789,14 +1789,14 @@ WSP.linkHandler = function(node, state, cb) {
 				linkData.type = 'mw:WikiLink';
 				linkData.isInterwiki = true;
 				var oldPrefix = target.value.match(/^(:?[^:]+):/);
-				if (oldPrefix &&
+				if (oldPrefix && (
 						oldPrefix[1].toLowerCase() === interWikiMatch[0].toLowerCase() ||
 						// Check if the old prefix mapped to the same URL as
 						// the new one. Use the old one if that's the case.
 						// Example: [[w:Foo]] vs. [[:en:Foo]]
 						(env.conf.wiki.interwikiMap[oldPrefix[1].toLowerCase()] || {}).url ===
 						(env.conf.wiki.interwikiMap[interWikiMatch[0].replace(/^:/, '')] || {}).url
-						)
+						))
 				{
 					// Reuse old prefix capitalization
 					if (Util.decodeEntities(target.value.substr(oldPrefix[1].length+1)) !== interWikiMatch[1])
@@ -3082,14 +3082,17 @@ WSP._serializeAttributes = function (state, node, token) {
 				// in pegTokenizer.pegjs.txt:generic_newline_attribute
 				k = k.replace( /^data-x-/i, '' );
 
-				if (v.length ) {
+				if (v.length > 0) {
 					if (!vInfo.fromsrc) {
 						// Escape HTML entities
 						v = Util.escapeEntities(v);
 					}
 					out.push(k + '=' + '"' + v.replace( /"/g, '&quot;' ) + '"');
-				} else {
+				} else if (k.match(/[{<]/)) {
+					// Templated, <*include*>, or <ext-tag> generated
 					out.push(k);
+				} else {
+					out.push(k + '=""');
 				}
 			}
 		} else if ( kv.v.length ) {
@@ -3816,6 +3819,13 @@ WSP.makeSeparator = function(sep, nlConstraints, state) {
 		var isIndentPreSafe = false,
 			constraintInfo = nlConstraints.constraintInfo || {};
 
+		// Special case for <br> nodes
+		if ((constraintInfo.sepType === 'sibling' ||
+			 constraintInfo.sepType === 'parent-child') &&
+			constraintInfo.nodeB.nodeName === 'BR')
+		{
+			isIndentPreSafe = true;
+		}
 		// Example of sibling sepType scenario:
 		// <p>foo</p>
 		//  <span>bar</span>
@@ -3827,7 +3837,7 @@ WSP.makeSeparator = function(sep, nlConstraints, state) {
 		//  </span>bar
 		// The " </span>bar" will be wrapped in an indent-pre if the
 		// leading space is not stripped since span is not a block tag
-		if ((constraintInfo.sepType === 'sibling' ||
+		else if ((constraintInfo.sepType === 'sibling' ||
 			constraintInfo.sepType === 'child-parent') &&
 			Util.isBlockTag(constraintInfo.nodeB.nodeName))
 		{

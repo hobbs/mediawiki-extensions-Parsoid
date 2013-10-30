@@ -152,6 +152,11 @@ ParsoidConfig.prototype.editMode = true;
 ParsoidConfig.prototype.version = 0;
 
 /**
+ * @property {boolean} storeDataParsoid
+ */
+ParsoidConfig.prototype.storeDataParsoid = false;
+
+/**
  * @property {boolean} useNativeGallery
  */
 ParsoidConfig.prototype.useNativeGallery = false;

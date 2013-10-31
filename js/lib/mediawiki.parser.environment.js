@@ -304,9 +304,9 @@ MWParserEnvironment.prototype.getPerformanceHeader = function () {
 };
 
 MWParserEnvironment.prototype.isApiSourceAUri = function( apiSource ) {
-	var uriPattern = /^https?%3A%2F%2F(.*)/gi;
-	apiSource = encodeURIComponent( apiSource );
-	return !apiSource.match( uriPattern ) ? false : true;
+	var uriPattern = /^https?:\/\/(.*)/gi;
+	apiSource = apiSource;
+	return !!apiSource.match( uriPattern );
 };
 
 /**

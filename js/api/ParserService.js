@@ -686,9 +686,10 @@ function wt2html( req, res, wt ) {
 	}
 }
 
-// TODO: Ken
+// pattern for all routes that do not begin with _
+var patternForApiUriOrPrefix = '^[^_](.+)/(.*)';
 // Regular article parsing
-app.get( new RegExp( '^[^_](.+)/(.*)' ), interParams, parserEnvMw, function(req, res) {
+app.get( new RegExp( patternForApiUriOrPrefix ), interParams, parserEnvMw, function(req, res) {
 	var env = res.locals.env;
 
 	// TODO gwicke: re-enable this when actually using Varnish
@@ -701,9 +702,8 @@ app.get( new RegExp( '^[^_](.+)/(.*)' ), interParams, parserEnvMw, function(req,
 	wt2html( req, res );
 });
 
-// TODO: Ken
 // Regular article serialization using POST
-app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function ( req, res ) {
+app.post( new RegExp( patternForApiUriOrPrefix ), interParams, parserEnvMw, function ( req, res ) {
 
 	// parse html or wt
 	if ( req.body.wt ) {
@@ -753,110 +753,6 @@ app.get( /\/_ci\/master/, function ( req, res ) {
 		res.end( '' );
 	} );
 } );
-
-// var _config = require('./controllers/config.js');
-// app.get( encodedURIRegex, _config.post);
-// var encodedURIRegex = /(^|\s)\/((https?%3A%2F%2F\S*)?)\/(.*)/gi;
-// var crypto = require( 'crypto' );
-// function Prefixer( str ) {
-// 	this.cache = {};
-// 	this.init( str );
-// }
-// 
-// Prefixer.prototype.init = function( str ) {
-// 	this.prefix = str + '-';
-// };
-// 
-// Prefixer.prototype.set = function( endpoint ) {
-// 	var timestamp = new Date().valueOf().toString();
-// 	var random = Math.random().toString();
-// 
-// 	var id = crypto
-// 		.createHash( 'sha1' )
-// 		.update( timestamp + random )
-// 		.digest( 'hex' );
-// 
-// 	endpoint = decodeURIComponent( endpoint );
-// 
-// 	if ( typeof endpoint === 'string' ) {
-// 		parsoidConfig.setInterwiki( id, endpoint );
-// 		this.cache[ id ] = endpoint;
-// 		return id;
-// 	} else {
-// 		throw 'Not a valid endpoint';
-// 	}
-// };
-// 
-// Prefixer.prototype.get = function( prefix ) {
-// 	return this.cache[ prefix ];
-// };
-// 
-// Prefixer.prototype.delete = function( id ) {
-// 	delete this.cache[ id ];
-// 	delete parsoidConfig[ id ];
-// };
-// 
-// var prefixStore = new Prefixer( 'tmp' );
-// 
-// app.get( encodedURIRegex, function( req, res ) {
-// 	var parts,
-// 			article;
-// 
-// 	parts = req.url.slice( 1 ).split( '/' );
-// 	article = {
-// 		parent: parts[ 1 ],
-// 		child: parts[ 2 ]
-// 	};
-// 
-// 	var prefix = prefixStore.set( parts[ 0 ] );
-// 
-// 	var cb = function ( env ) {
-// 		if ( env.page.name === 'favicon.ico' ) {
-// 			res.send( 'no favicon yet..', 404 );
-// 			return;
-// 		}
-// 
-// 		//console.log(req.headers);
-// 
-// 		var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
-// 
-// 		// Set the timeout to 900 seconds..
-// 		req.connection.setTimeout(900 * 1000);
-// 
-// 		console.log('starting parsing of ' + prefix + ':' + target);
-// 		var oldid = null;
-// 		if ( req.query.oldid && !req.headers.cookie ) {
-// 			oldid = req.query.oldid;
-// 			res.setHeader('Cache-Control', 's-maxage=2592000');
-// 		} else {
-// 			// Don't cache requests with a session or no oldid
-// 			res.setHeader('Cache-Control', 'private,no-cache,s-maxage=0');
-// 		}
-// 		if (env.conf.parsoid.allowCORS) {
-// 			// allow cross-domain requests (CORS) so that parsoid service
-// 			// can be used by third-party sites
-// 			res.setHeader('Access-Control-Allow-Origin',
-// 						  env.conf.parsoid.allowCORS);
-// 		}
-// 
-// 		var tpr = new TemplateRequest( env, target, oldid );
-// 		tpr.once('src', parse.bind( null, env, req, res, function ( req, res, src, doc ) {
-// 			var out = DU.serializeNode(doc.documentElement);
-// 			res.setHeader('X-Parsoid-Performance', env.getPerformanceHeader());
-// 			res.end(out);
-// 			console.warn("completed parsing of " + prefix +
-// 				':' + target + " in " + env.performance.duration + " ms");
-// 		}));
-// 
-// 		prefixStore.delete( prefix );
-// 	};
-// 
-// 	console.log(parsoidConfig.interwikiMap);
-// 
-// 	// var prefix = req.params[0];
-// 	getParserServiceEnv( res, prefix, article.parent, cb, req );
-// 
-// });
 
 app.use( express.static( __dirname + '/scripts' ) );
 app.use( express.limit( '15mb' ) );

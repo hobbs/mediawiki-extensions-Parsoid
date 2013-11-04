@@ -796,7 +796,7 @@ ImageInfoRequest.prototype._handleJSON = function ( error, data ) {
  * @param {MWParserEnvironment} env
  * @param {string} filename
  */
-function PhotoAttributionRequest( env, filename ) {
+function ImageAttributionRequest( env, filename ) {
 	ApiRequest.call( this, env, null );
 	this.env = env;
 
@@ -804,7 +804,7 @@ function PhotoAttributionRequest( env, filename ) {
 		url = conf.apiURI + '?';
 
 	var apiArgs = {
-		action: 'apiphotoattribution',
+		action: 'apiimageattribution',
 		format: 'json',
 		file: filename
 	};
@@ -825,12 +825,12 @@ function PhotoAttributionRequest( env, filename ) {
 	this.request( this.requestOptions, this._requestCB.bind( this ) );
 }
 
-util.inherits( PhotoAttributionRequest, ApiRequest );
+util.inherits( ImageAttributionRequest, ApiRequest );
 
 /**
  * @inheritdoc ApiRequest#_handleJSON
  */
-PhotoAttributionRequest.prototype._handleJSON = function ( error, data ) {
+ImageAttributionRequest.prototype._handleJSON = function ( error, data ) {
 	var pagenames, names, namelist, newpages, pages, pagelist, ix;
 
 	if ( error ) {
@@ -859,7 +859,7 @@ if (typeof module === "object") {
 	module.exports.PHPParseRequest = PHPParseRequest;
 	module.exports.ParsoidCacheRequest = ParsoidCacheRequest;
 	module.exports.ImageInfoRequest = ImageInfoRequest;
-	module.exports.PhotoAttributionRequest = PhotoAttributionRequest;
+	module.exports.ImageAttributionRequest = ImageAttributionRequest;
 	module.exports.DoesNotExistError = DoesNotExistError;
 	module.exports.ParserError = ParserError;
 }

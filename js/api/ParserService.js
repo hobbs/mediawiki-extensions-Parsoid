@@ -573,7 +573,12 @@ app.post(/\/_rtform\/(.*)/, defaultParams, parserEnvMw, function ( req, res ) {
 
 function html2wt( req, res, html ) {
 	var env = res.locals.env;
-	env.page.id = req.body.oldid || null;
+	if ( req.body.oldwt ) {
+		env.setPageSrcInfo( req.body.oldwt );
+		env.page.id = null;
+	} else {
+		env.page.id = req.body.oldid || null;
+	}
 
 	var doc;
 	try {

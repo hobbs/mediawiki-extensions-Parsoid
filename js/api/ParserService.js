@@ -402,13 +402,13 @@ function defaultParams( req, res, next ) {
 }
 
 function interParams( req, res, next ) {
-	res.locals.iwp = req.params[0];
+	res.locals.apiSource = req.params[0];
 	res.locals.pageName = req.params[1];
 	next();
 }
 
 function parserEnvMw( req, res, next ) {
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.iwp, res.locals.pageName, req.headers.cookie, function ( err, env ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.apiSource, res.locals.pageName, req.headers.cookie, function ( err, env ) {
 		env.errCB = function ( e ) {
 			e = new ParserError(
 				e.message,
@@ -602,13 +602,13 @@ function html2wt( req, res, html ) {
 
 function wt2html( req, res, wt ) {
 	var env = res.locals.env;
-	var prefix = res.locals.iwp;
+	var apiSource = res.locals.apiSource;
 	var target = env.resolveTitle( env.normalizeTitle( env.page.name ), '' );
 
 	// Set the timeout to 900 seconds..
 	req.connection.setTimeout( 900 * 1000 );
 
-	console.log( 'starting parsing of ' + prefix + ':' + target );
+	console.log( 'starting parsing of ' + apiSource + ':' + target );
 
 	if ( env.conf.parsoid.allowCORS ) {
 		// allow cross-domain requests (CORS) so that parsoid service
@@ -670,7 +670,7 @@ function wt2html( req, res, wt ) {
 
 				// Redirect to oldid
 				res.redirect( req.path + "?oldid=" + env.page.meta.revision.revid );
-				console.warn( "redirected " + prefix + ':' + target + " to revision " + env.page.meta.revision.revid );
+				console.warn( "redirected " + apiSource + ':' + target + " to revision " + env.page.meta.revision.revid );
 			};
 		}
 	}
@@ -682,12 +682,14 @@ function wt2html( req, res, wt ) {
 		var out = DU.serializeNode( doc );
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
 		res.end( out );
-		console.warn( "completed parsing of " + prefix + ':' + target + " in " + env.performance.duration + " ms" );
+		console.warn( "completed parsing of " + apiSource + ':' + target + " in " + env.performance.duration + " ms" );
 	}
 }
 
+// pattern for all routes that do not begin with _
+var patternForApiUriOrPrefix = '^[^_](.+)/(.*)';
 // Regular article parsing
-app.get( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function(req, res) {
+app.get( new RegExp( patternForApiUriOrPrefix ), interParams, parserEnvMw, function(req, res) {
 	var env = res.locals.env;
 
 	// TODO gwicke: re-enable this when actually using Varnish
@@ -701,7 +703,7 @@ app.get( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEn
 });
 
 // Regular article serialization using POST
-app.post( new RegExp( '/(' + getInterwikiRE() + ')/(.*)' ), interParams, parserEnvMw, function ( req, res ) {
+app.post( new RegExp( patternForApiUriOrPrefix ), interParams, parserEnvMw, function ( req, res ) {
 
 	// parse html or wt
 	if ( req.body.wt ) {

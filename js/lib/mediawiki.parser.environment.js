@@ -263,7 +263,7 @@ MWParserEnvironment.prototype.setVariable = function( varname, value, options ) 
  * @param {Error} cb.err
  * @param {MWParserEnvironment} cb.env The finished environment object
  */
-MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix, pageName, cookie, cb ) {
+MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, apiSource, pageName, cookie, cb ) {
 	if ( !parsoidConfig ) {
 		parsoidConfig = new ParsoidConfig();
 		parsoidConfig.setInterwiki( 'mw', 'http://www.mediawiki.org/w/api.php' );
@@ -281,7 +281,7 @@ MWParserEnvironment.getParserEnv = function ( parsoidConfig, wikiConfig, prefix,
 	}
 
 	// Get that wiki's config
-	env.switchToConfig( prefix, function ( err ) {
+	env.switchToConfig( apiSource, function ( err ) {
 		cb( err, env );
 	} );
 };
@@ -303,6 +303,10 @@ MWParserEnvironment.prototype.getPerformanceHeader = function () {
 	} ).join( '; ' );
 };
 
+MWParserEnvironment.prototype.isApiSourceAUri = function( apiSource ) {
+	return ( /^https?:\/\/(.*)/gi ).test( apiSource );
+};
+
 /**
  * Function that switches to a different configuration for a different wiki.
  * Caches all configs so we only need to get each one once (if we do it right)
@@ -311,46 +315,54 @@ MWParserEnvironment.prototype.getPerformanceHeader = function () {
  * @param {Function} cb
  * @param {Error} cb.err
  */
-MWParserEnvironment.prototype.switchToConfig = function ( prefix, cb ) {
+MWParserEnvironment.prototype.switchToConfig = function ( apiSource, cb ) {
+	var isUri = this.isApiSourceAUri( apiSource );
 
 	function setupWikiConfig(env, apiURI, error, config) {
 		if ( error === null ) {
-			env.conf.wiki = new WikiConfig( config, prefix, apiURI );
-			env.confCache[prefix] = env.conf.wiki;
+			env.conf.wiki = new WikiConfig( config, apiSource, apiURI );
+			env.confCache[apiSource] = env.conf.wiki;
 		}
 
 		cb( error );
 	}
 
-	if (!prefix) {
-		console.error("ERROR: No prefix provided!");
-		cb(new Error("Wiki prefix not provided"));
+	if (!apiSource) {
+		console.error("ERROR: No valid prefix or API URI provided!");
+		cb(new Error("Wiki prefix or API URI not provided"));
 		return;
 	}
 
-	var uri = this.conf.parsoid.interwikiMap[prefix];
-	if (!uri) {
-		// SSS: Ugh! Looks like parser tests use a prefix
-		// that is not part of the interwikiMap -- so we
-		// cannot crash with an error.  Hence defaulting
-		// to enwiki api which is quite odd.  Does the
-		// interwikiMap need updating or is this use-case
-		// valid outside of parserTests??
-		console.error("ERROR: Did not find api uri for " + prefix + "; defaulting to en");
-		uri = this.conf.parsoid.interwikiMap.en;
+	var uri;
+
+	if ( isUri ) {
+		uri = apiSource;
+	} else {
+		uri = this.conf.parsoid.interwikiMap[ apiSource ];
+
+		if (!uri) {
+			// SSS: Ugh! Looks like parser tests use a prefix
+			// that is not part of the interwikiMap -- so we
+			// cannot crash with an error.  Hence defaulting
+			// to enwiki api which is quite odd.  Does the
+			// interwikiMap need updating or is this use-case
+			// valid outside of parserTests??
+			console.error("ERROR: Did not find api uri for " + apiSource + "; defaulting to en");
+			uri = this.conf.parsoid.interwikiMap.en;
+		}
 	}
 
 	this.conf.parsoid.apiURI = uri;
 
-	if ( this.confCache[prefix] ) {
-		this.conf.wiki = this.confCache[prefix];
+	if ( this.confCache[ apiSource ] ) {
+		this.conf.wiki = this.confCache[ apiSource ];
 		cb( null );
-	} else if ( this.conf.parsoid.fetchConfig ) {
+	} else if ( this.conf.parsoid.fetchConfig || isUri ) {
 		var confRequest = new ConfigRequest( uri, this );
 		confRequest.on( 'src', setupWikiConfig.bind(null, this, uri));
 	} else {
 		// Load the config from cached config on disk
-		var localConfigFile = './baseconfig/' + prefix + '.json',
+		var localConfigFile = './baseconfig/' + apiSource + '.json',
 			localConfig = require(localConfigFile);
 
 		if (localConfig && localConfig.query) {

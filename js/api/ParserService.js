@@ -25,7 +25,8 @@ var express = require('express'),
 	spawn = childProc.spawn,
 	cluster = require('cluster'),
 	fs = require('fs'),
-	path = require('path');
+	path = require('path'),
+	newrelic = require('newrelic');
 
 // local includes
 var mp = '../lib/';
@@ -356,6 +357,9 @@ app.use(express.favicon(path.join(__dirname, "favicon.ico")));
 app.use(express.bodyParser({maxFieldsSize: 15 * 1024 * 1024}));
 
 app.get('/', function(req, res){
+	// Ignore root in New Relic metrics
+	newrelic.setIgnoreTransaction(true);
+
 	res.write('<html><body>\n');
 	res.write('<h3>Welcome to the alpha test web service for the ' +
 		'<a href="http://www.mediawiki.org/wiki/Parsoid">Parsoid project</a>.</h3>\n');

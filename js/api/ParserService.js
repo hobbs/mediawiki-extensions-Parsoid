@@ -408,7 +408,7 @@ function interParams( req, res, next ) {
 }
 
 function parserEnvMw( req, res, next ) {
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.apiSource || res.locals.iwp, res.locals.pageName, req.headers.cookie, function ( err, env ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.apiSource, res.locals.pageName, req.headers.cookie, function ( err, env ) {
 		env.errCB = function ( e ) {
 			e = new ParserError(
 				e.message,
@@ -687,7 +687,7 @@ function wt2html( req, res, wt ) {
 }
 
 // pattern for all routes that do not begin with _
-var patternForApiUriOrPrefix = '^[^\/?_](.+)/(.*)';
+var patternForApiUriOrPrefix = '^[^_](.+)/(.*)';
 // Regular article parsing
 app.get( new RegExp( patternForApiUriOrPrefix ), interParams, parserEnvMw, function(req, res) {
 	var env = res.locals.env;

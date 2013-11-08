@@ -620,31 +620,31 @@ function wt2html( req, res, wt ) {
 	var tmpCb, oldid = null;
 	if ( wt ) {
 		wt = wt.replace( /\r/g, '' );
-		tmpCb = function ( err, src_and_metadata ) {
-			if ( err ) {
-				env.errCB( err );
-				return;
-			}
+		// tmpCb = (function ( err, src_and_metadata ) {
+		// 	if ( err ) {
+		// 		env.errCB( err );
+		// 		return;
+		// 	}
 
-			var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
-			parser.on( 'document', function ( document ) {
-				res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
-				// Don't cache requests when wt is set in case somebody uses
-				// GET for wikitext parsing
-				res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
-				sendRes( req.body.body ? document.body : document );
-			});
+		var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
+		parser.on( 'document', function ( document ) {
+			res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
+			// Don't cache requests when wt is set in case somebody uses
+			// GET for wikitext parsing
+			res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
+			sendRes( req.body.body ? document.body : document );
+		});
 
-			// Set the source
-			env.setPageSrcInfo( src_and_metadata );
+		// Set the source
+		env.setPageSrcInfo( '' );
 
-			try {
-				parser.processToplevelDoc( wt );
-			} catch ( e ) {
-				env.errCB( e );
-				return;
-			}
-		};
+		try {
+			parser.processToplevelDoc( wt );
+		} catch ( e ) {
+			env.errCB( e );
+			return;
+		}
+		// })();
 	} else {
 		if ( req.query.oldid ) {
 			oldid = req.query.oldid;
@@ -673,10 +673,10 @@ function wt2html( req, res, wt ) {
 				console.warn( "redirected " + apiSource + ':' + target + " to revision " + env.page.meta.revision.revid );
 			};
 		}
+		var tpr = new TemplateRequest( env, target, oldid );
+		tpr.once( 'src', tmpCb );
 	}
 
-	var tpr = new TemplateRequest( env, target, oldid );
-	tpr.once( 'src', tmpCb );
 
 	function sendRes( doc ) {
 		var out = DU.serializeNode( doc );

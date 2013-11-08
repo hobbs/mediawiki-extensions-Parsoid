@@ -620,12 +620,6 @@ function wt2html( req, res, wt ) {
 	var tmpCb, oldid = null;
 	if ( wt ) {
 		wt = wt.replace( /\r/g, '' );
-		// tmpCb = (function ( err, src_and_metadata ) {
-		// 	if ( err ) {
-		// 		env.errCB( err );
-		// 		return;
-		// 	}
-
 		var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
 		parser.on( 'document', function ( document ) {
 			res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
@@ -644,7 +638,6 @@ function wt2html( req, res, wt ) {
 			env.errCB( e );
 			return;
 		}
-		// })();
 	} else {
 		if ( req.query.oldid ) {
 			oldid = req.query.oldid;
@@ -676,7 +669,6 @@ function wt2html( req, res, wt ) {
 		var tpr = new TemplateRequest( env, target, oldid );
 		tpr.once( 'src', tmpCb );
 	}
-
 
 	function sendRes( doc ) {
 		var out = DU.serializeNode( doc );

@@ -630,7 +630,7 @@ function wt2html( req, res, wt ) {
 		});
 
 		// Set the source
-		env.setPageSrcInfo( '' );
+		env.setPageSrcInfo( wt );
 
 		try {
 			parser.processToplevelDoc( wt );

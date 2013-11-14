@@ -4,7 +4,8 @@
  * not much else right now.
  */
 
-var cluster = require('cluster');
+var cluster = require('cluster'),
+		newrelic = require('newrelic');
 
 if (cluster.isMaster) {
 	// Start a few more workers than there are cpus visible to the OS, so that we

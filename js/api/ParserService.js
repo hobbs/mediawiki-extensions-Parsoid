@@ -26,7 +26,7 @@ var express = require('express'),
 	cluster = require('cluster'),
 	fs = require('fs'),
 	path = require('path'),
-	newrelic = require('newrelic');
+	newrelic;
 
 // local includes
 var mp = '../lib/';
@@ -358,7 +358,9 @@ app.use(express.bodyParser({maxFieldsSize: 15 * 1024 * 1024}));
 
 app.get('/', function(req, res){
 	// Ignore root in New Relic metrics
-	newrelic.setIgnoreTransaction(true);
+	if ( newrelic ) {
+		newrelic.setIgnoreTransaction(true);
+	}
 
 	res.write('<html><body>\n');
 	res.write('<h3>Welcome to the alpha test web service for the ' +
@@ -763,5 +765,10 @@ app.use( express.limit( '15mb' ) );
 
 console.log( ' - ' + instanceName + ' ready' );
 
-module.exports = app;
+module.exports = function( configFlags ) {
+	if ( configFlags && configFlags.newrelic ) {
+		newrelic = require('newrelic');
+	}
+	return app;
+};
 

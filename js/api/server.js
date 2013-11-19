@@ -6,14 +6,6 @@
 
 var cluster = require('cluster');
 
-var configFlags = {};
-process.argv.splice(2).forEach(function( arg ) {
-	if ( arg.match('newrelic') ) {
-		require('newrelic');
-	}
-	configFlags[ e.slice(2) ] = true;
-});
-
 if (cluster.isMaster) {
 	// Start a few more workers than there are cpus visible to the OS, so that we
 	// get some degree of parallelism even on single-core systems. A single
@@ -61,7 +53,7 @@ if (cluster.isMaster) {
 		heapdump.writeSnapshot();
 	});
 
-	var app = require('./ParserService.js')( configFlags );
+	var app = require('./ParserService.js');
 	// when running on appfog.com the listen port for the app
 	// is passed in an environment variable.  Most users can ignore this!
 	app.listen(process.env.VCAP_APP_PORT || 8000);

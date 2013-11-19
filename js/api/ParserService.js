@@ -68,6 +68,10 @@ var interwikiRE;
  */
 var parsoidConfig = new ParsoidConfig( localSettings, null );
 
+if ( parsoidConfig.newRelic ) {
+	newrelic = require('newrelic');
+}
+
 /**
  * The serializer to use for the web requests.
  * @property {Function} Serializer
@@ -765,10 +769,4 @@ app.use( express.limit( '15mb' ) );
 
 console.log( ' - ' + instanceName + ' ready' );
 
-module.exports = function( configFlags ) {
-	if ( configFlags && configFlags.newrelic ) {
-		newrelic = require('newrelic');
-	}
-	return app;
-};
-
+module.exports = app;

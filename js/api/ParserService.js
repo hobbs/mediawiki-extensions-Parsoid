@@ -25,7 +25,8 @@ var express = require('express'),
 	spawn = childProc.spawn,
 	cluster = require('cluster'),
 	fs = require('fs'),
-	path = require('path');
+	path = require('path'),
+	newrelic;
 
 // local includes
 var mp = '../lib/';
@@ -66,6 +67,10 @@ var interwikiRE;
  * @property {ParsoidConfig}
  */
 var parsoidConfig = new ParsoidConfig( localSettings, null );
+
+if ( parsoidConfig.newRelic ) {
+	newrelic = require('newrelic');
+}
 
 /**
  * The serializer to use for the web requests.
@@ -356,6 +361,11 @@ app.use(express.favicon(path.join(__dirname, "favicon.ico")));
 app.use(express.bodyParser({maxFieldsSize: 15 * 1024 * 1024}));
 
 app.get('/', function(req, res){
+	// Ignore root in New Relic metrics
+	if ( newrelic ) {
+		newrelic.setIgnoreTransaction(true);
+	}
+
 	res.write('<html><body>\n');
 	res.write('<h3>Welcome to the alpha test web service for the ' +
 		'<a href="http://www.mediawiki.org/wiki/Parsoid">Parsoid project</a>.</h3>\n');
@@ -757,4 +767,3 @@ app.use( express.limit( '15mb' ) );
 console.log( ' - ' + instanceName + ' ready' );
 
 module.exports = app;
-

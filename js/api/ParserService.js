@@ -687,8 +687,16 @@ function wt2html( req, res, wt ) {
 
 	function sendRes( doc ) {
 		var out = DU.serializeNode( doc );
+		var window = domino.createWindow( out );
+		var document = window.document;
+		Array.prototype.forEach.call( document.querySelectorAll('*'), function( node ) {
+			if ( node.hasAttribute( 'style' ) ) node.removeAttribute( 'style' );
+			if ( node.hasAttribute( 'data-parsoid' ) ) node.removeAttribute( 'data-parsoid' );
+			if ( node.hasAttribute( 'class' ) ) node.removeAttribute( 'class' );
+		});
+		
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
-		res.end( out );
+		res.end( document.innerHTML );
 		console.warn( "completed parsing of " + apiSource + ':' + target + " in " + env.performance.duration + " ms" );
 	}
 }

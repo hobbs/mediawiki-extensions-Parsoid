@@ -418,7 +418,7 @@ function interParams( req, res, next ) {
 }
 
 function parserEnvMw( req, res, next ) {
-	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.apiSource || res.locals.iwp, res.locals.pageName, req.headers.cookie, function ( err, env ) {
+	MWParserEnvironment.getParserEnv( parsoidConfig, null, res.locals.apiSource, res.locals.pageName, req.headers.cookie, function ( err, env ) {
 		env.errCB = function ( e ) {
 			e = new ParserError(
 				e.message,
@@ -428,7 +428,7 @@ function parserEnvMw( req, res, next ) {
 			next( e );
 		};
 		if ( err ) {
-			return env.errCB( err );
+			return env.errCb( err );
 		}
 		res.locals.env = env;
 		next();
@@ -583,12 +583,7 @@ app.post(/\/_rtform\/(.*)/, defaultParams, parserEnvMw, function ( req, res ) {
 
 function html2wt( req, res, html ) {
 	var env = res.locals.env;
-	if ( req.body.oldwt ) {
-		env.setPageSrcInfo( req.body.oldwt );
-		env.page.id = null;
-	} else {
-		env.page.id = req.body.oldid || null;
-	}
+	env.page.id = req.body.oldid || null;
 
 	var doc;
 	try {
@@ -635,24 +630,31 @@ function wt2html( req, res, wt ) {
 	var tmpCb, oldid = null;
 	if ( wt ) {
 		wt = wt.replace( /\r/g, '' );
-		var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
-		parser.on( 'document', function ( document ) {
-			res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
-			// Don't cache requests when wt is set in case somebody uses
-			// GET for wikitext parsing
-			res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
-			sendRes( req.body.body ? document.body : document );
-		});
+		tmpCb = function ( err, src_and_metadata ) {
+			if ( err ) {
+				env.errCB( err );
+				return;
+			}
 
-		// Set the source
-		env.setPageSrcInfo( wt );
+			var parser = Util.getParserPipeline( env, 'text/x-mediawiki/full' );
+			parser.on( 'document', function ( document ) {
+				res.setHeader( 'Content-Type', 'text/html; charset=UTF-8' );
+				// Don't cache requests when wt is set in case somebody uses
+				// GET for wikitext parsing
+				res.setHeader( 'Cache-Control', 'private,no-cache,s-maxage=0' );
+				sendRes( req.body.body ? document.body : document );
+			});
 
-		try {
-			parser.processToplevelDoc( wt );
-		} catch ( e ) {
-			env.errCB( e );
-			return;
-		}
+			// Set the source
+			env.setPageSrcInfo( src_and_metadata );
+
+			try {
+				parser.processToplevelDoc( wt );
+			} catch ( e ) {
+				env.errCB( e );
+				return;
+			}
+		};
 	} else {
 		if ( req.query.oldid ) {
 			oldid = req.query.oldid;
@@ -681,18 +683,29 @@ function wt2html( req, res, wt ) {
 				console.warn( "redirected " + apiSource + ':' + target + " to revision " + env.page.meta.revision.revid );
 			};
 		}
-		var tpr = new TemplateRequest( env, target, oldid );
-		tpr.once( 'src', tmpCb );
 	}
+
+	var tpr = new TemplateRequest( env, target, oldid );
+	tpr.once( 'src', tmpCb );
 
 	function sendRes( doc ) {
 		var out = DU.serializeNode( doc );
+
+		/*
+		 * The quickest proof of concept way to deliver no-frills semantic html
+		 * There is probably a way to do this within Parsoid's config, but this was just
+		 * easier for Hackathon purposes
+		 */
 		var window = domino.createWindow( out );
 		var document = window.document;
 		Array.prototype.forEach.call( document.querySelectorAll('*'), function( node ) {
-			if ( node.hasAttribute( 'style' ) ) node.removeAttribute( 'style' );
-			if ( node.hasAttribute( 'data-parsoid' ) ) node.removeAttribute( 'data-parsoid' );
+			// most of these classes are useless to our hack
 			if ( node.hasAttribute( 'class' ) ) node.removeAttribute( 'class' );
+			// why are inline styles in here at all !?
+			if ( node.hasAttribute( 'style' ) ) node.removeAttribute( 'style' );
+			// these data tags might have useful information in them... but for now...
+			if ( node.hasAttribute( 'data-mw' ) ) node.removeAttribute( 'data-mw' );
+			if ( node.hasAttribute( 'data-parsoid' ) ) node.removeAttribute( 'data-parsoid' );
 		});
 		
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
@@ -702,7 +715,7 @@ function wt2html( req, res, wt ) {
 }
 
 // pattern for all routes that do not begin with _
-var patternForApiUriOrPrefix = '^[/_](.+)/(.*)';
+var patternForApiUriOrPrefix = '^[^_](.+)/(.*)';
 // Regular article parsing
 app.get( new RegExp( patternForApiUriOrPrefix ), interParams, parserEnvMw, function(req, res) {
 	var env = res.locals.env;

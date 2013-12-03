@@ -707,9 +707,12 @@ function wt2html( req, res, wt ) {
 			if ( node.hasAttribute( 'data-mw' ) ) node.removeAttribute( 'data-mw' );
 			if ( node.hasAttribute( 'data-parsoid' ) ) node.removeAttribute( 'data-parsoid' );
 		});
-		
+
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
-		res.end( document.innerHTML );
+		res.send({
+			html: document.querySelector('body').innerHTML.toString(),
+			title: document.title,
+		});
 		console.warn( "completed parsing of " + apiSource + ':' + target + " in " + env.performance.duration + " ms" );
 	}
 }

@@ -698,15 +698,17 @@ function wt2html( req, res, wt ) {
 		 */
 		var window = domino.createWindow( out );
 		var document = window.document;
+		var blacklist = [
+			'class',
+			'style',
+			'data-mw',
+			'data-parsoid',
+			'bgcolor'
+		];
 		Array.prototype.forEach.call( document.querySelectorAll('*'), function( node ) {
-			// most of these classes are useless to our hack
-			if ( node.hasAttribute( 'class' ) ) node.removeAttribute( 'class' );
-			// why are inline styles in here at all !?
-			if ( node.hasAttribute( 'style' ) ) node.removeAttribute( 'style' );
-			// these data tags might have useful information in them... but for now...
-			if ( node.hasAttribute( 'data-mw' ) ) node.removeAttribute( 'data-mw' );
-			if ( node.hasAttribute( 'data-parsoid' ) ) node.removeAttribute( 'data-parsoid' );
-			if ( node.hasAttribute( 'bgcolor' ) ) node.removeAttribute( 'bgcolor' );
+			blacklist.forEach(function( item ) {
+				if ( node.hasAttribute( item ) ) node.removeAttribute( item );
+			});
 			if ( node.nodeName === 'SCRIPT' ) node.innerHTML = '';
 		});
 

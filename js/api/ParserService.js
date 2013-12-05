@@ -705,7 +705,15 @@ function wt2html( req, res, wt ) {
 			'data-parsoid',
 			'bgcolor'
 		];
+
+		var redirect = null;
+
 		Array.prototype.forEach.call( document.querySelectorAll('*'), function( node ) {
+			if ( node.hasAttribute( 'rel' ) && node.rel === 'mw:PageProp/redirect' ) {
+				redirect = node.href.slice(1);
+				return;
+			}
+
 			blacklist.forEach(function( item ) {
 				if ( node.hasAttribute( item ) ) node.removeAttribute( item );
 			});
@@ -714,8 +722,9 @@ function wt2html( req, res, wt ) {
 
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
 		res.send({
-			html: document.querySelector('body').innerHTML.toString(),
+			html: redirect ? redirect : document.querySelector('body').innerHTML.toString(),
 			title: document.title,
+			redirect: !!redirect
 		});
 		console.warn( "completed parsing of " + apiSource + ':' + target + " in " + env.performance.duration + " ms" );
 	}

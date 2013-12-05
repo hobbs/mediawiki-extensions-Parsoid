@@ -703,7 +703,10 @@ function wt2html( req, res, wt ) {
 			'style',
 			'data-mw',
 			'data-parsoid',
-			'bgcolor'
+			'bgcolor',
+			'border',
+			'cellpadding',
+			'cellspacing'
 		];
 
 		var redirect = null;

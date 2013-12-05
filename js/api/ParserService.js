@@ -706,6 +706,7 @@ function wt2html( req, res, wt ) {
 			// these data tags might have useful information in them... but for now...
 			if ( node.hasAttribute( 'data-mw' ) ) node.removeAttribute( 'data-mw' );
 			if ( node.hasAttribute( 'data-parsoid' ) ) node.removeAttribute( 'data-parsoid' );
+			if ( node.hasAttribute( 'bgcolor' ) ) node.removeAttribute( 'bgcolor' );
 			if ( node.nodeName === 'SCRIPT' ) node.innerHTML = '';
 		});
 

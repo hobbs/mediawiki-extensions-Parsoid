@@ -721,6 +721,16 @@ function wt2html( req, res, wt ) {
 				if ( node.hasAttribute( item ) ) node.removeAttribute( item );
 			});
 			if ( node.nodeName === 'SCRIPT' ) node.innerHTML = '';
+
+			if ( 
+				node.nodeName === 'TABLE' &&
+				node.hasAttribute( 'about' ) &&
+				node.attributes.about.value === '#mwt1' ) {
+				node.classList.add( 'infobox' );
+			}
+			if ( node.nodeName.match( /H[1-6]/ ) && node.textContent.length ) {
+				node.id = node.textContent.toLowerCase().replace( /\s|\.|\?/gi, '-' ).replace( /\'|\"|:|\(|\)/gi, '' );
+			}
 		});
 
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );

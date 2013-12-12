@@ -723,7 +723,7 @@ function wt2html( req, res, wt ) {
 			if ( node.nodeName === 'SCRIPT' ) node.innerHTML = '';
 			if ( node.nodeName === 'IMG' ) {
 				node.setAttribute( 'data-src', node.src );
-				node.setAttribute( 'wk-lazy-load', true );
+				node.setAttribute( 'wk-image-placer', true );
 				node.src = '';
 			}
 

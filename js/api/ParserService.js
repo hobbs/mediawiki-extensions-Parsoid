@@ -721,6 +721,11 @@ function wt2html( req, res, wt ) {
 				if ( node.hasAttribute( item ) ) node.removeAttribute( item );
 			});
 			if ( node.nodeName === 'SCRIPT' ) node.innerHTML = '';
+			if ( node.nodeName === 'IMG' ) {
+				node.setAttribute( 'data-src', node.src );
+				node.setAttribute( 'wk-lazy-load', true );
+				node.src = '';
+			}
 
 			if ( 
 				node.nodeName === 'TABLE' &&
@@ -735,6 +740,7 @@ function wt2html( req, res, wt ) {
 
 		res.setHeader( 'X-Parsoid-Performance', env.getPerformanceHeader() );
 		res.send({
+			page: env.page.meta,
 			html: redirect ? redirect : document.querySelector('body').innerHTML.toString(),
 			title: document.title,
 			redirect: !!redirect

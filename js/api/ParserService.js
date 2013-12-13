@@ -727,14 +727,14 @@ function wt2html( req, res, wt ) {
 				node.src = '';
 			}
 
-			if ( 
+			if (
 				node.nodeName === 'TABLE' &&
 				node.hasAttribute( 'about' ) &&
 				node.attributes.about.value === '#mwt1' ) {
 				node.classList.add( 'infobox' );
 			}
 			if ( node.nodeName.match( /H[1-6]/ ) && node.textContent.length ) {
-				node.id = node.textContent.toLowerCase().replace( /\s|\.|\?/gi, '-' ).replace( /\'|\"|:|\(|\)/gi, '' );
+				node.id = node.textContent.trim().toLowerCase().replace( /\s+/g, '-' ).replace( /[^\w-]/g, '' );
 			}
 		});
 
